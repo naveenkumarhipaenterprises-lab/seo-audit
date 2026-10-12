@@ -25,7 +25,24 @@ export const LIMITS = {
   rateWindowMs: 60_000,
   psiTimeoutMs: 60_000,
   renderTimeoutMs: 25_000,
+  /** Full Site crawl bounds. */
+  maxCrawlPages: 100,
+  defaultCrawlPages: 25,
+  maxCrawlDepth: 5,
+  defaultCrawlDepth: 2,
+  crawlConcurrency: 3,
+  /** Wall-clock budget for the crawl stage; the crawl stops (partial inventory) when it is reached. */
+  crawlTimeBudgetMs: Number(process.env.CRAWL_TIME_BUDGET_MS || 180_000),
+  maxSitemapSeeds: 200,
+  maxSitemapUrlsKept: 5000,
+  maxCompetitors: 3,
+  /** Finished jobs stay queryable this long so a refreshed page can still show the outcome. */
+  jobRetentionMs: 30 * 60_000,
+  psiCacheMs: 10 * 60_000,
 } as const;
+
+/** Bumped when the record shape or engine behaviour changes. */
+export const ENGINE_VERSION = "2.0.0";
 
 export const CRAWLER_TOKEN = "SearchScopeBot";
 export const CRAWLER_USER_AGENT =

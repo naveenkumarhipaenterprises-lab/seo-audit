@@ -3,6 +3,9 @@ import { integrationStatus } from "@/lib/audit/deps";
 import { APP_NAME } from "@/lib/config";
 import { METHODOLOGY_VERSION, OVERALL_WEIGHTS, SEO_COMPONENT_WEIGHTS, SEVERITY_WEIGHTS } from "@/lib/scoring/weights";
 import { CATEGORY_LABELS, type Category } from "@/lib/audit/types";
+import { connectionStatus } from "@/lib/integrations/gsc";
+import { currentOwnerId } from "@/lib/security/owner-server";
+import { GscConnect } from "@/components/gsc-connect";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Settings" };
@@ -10,15 +13,18 @@ export const metadata = { title: "Settings" };
 const ROWS = (s: ReturnType<typeof integrationStatus>) => [
   { name: "Google PageSpeed Insights", state: s.pagespeed === "configured" ? "Configured" : "Keyless (shared quota)", ok: true, help: "Optional PAGESPEED_API_KEY (free from Google Cloud) gives reliable quota. Without it, requests use Google's shared keyless quota and may be rate limited." },
   { name: "Browser rendering (Chromium)", state: s.rendering === "configured" ? "Configured" : "Not configured", ok: s.rendering === "configured", help: "Set CHROMIUM_PATH or ENABLE_BROWSER_RENDERING=1 where a Chromium binary is available. Needed for rendered and responsive checks." },
-  { name: "Google Search Console", state: "Not connected", ok: false, help: "Phase 2: OAuth connection and URL Inspection API for verified indexing status." },
-  { name: "Supabase (database & auth)", state: s.supabase === "configured_unused" ? "Credentials present (adapter in Phase 2)" : "Not configured", ok: false, help: "Phase 2. The schema is in supabase/migrations. Audits are stored on the server's file system for now." },
-  { name: "AI provider", state: "Not configured", ok: false, help: "Phase 3: optional server-side adapter. The audit never depends on it." },
-  { name: "Keyword data provider", state: "Not connected", ok: false, help: "Search volume, difficulty and rankings stay 'Unavailable' until a provider is connected." },
+  { name: "Supabase (database & auth)", state: s.supabase === "configured_unused" ? "Credentials present (adapter not built yet)" : "Not configured", ok: false, help: "The schema is in supabase/migrations. Audits are stored on the server's file system (AUDIT_DATA_DIR)." },
+  { name: "AI provider", state: "Not configured", ok: false, help: "Not integrated. The audit never depends on one." },
+  { name: "AI visibility data", state: "Not connected", ok: false, help: "No AI citation or mention data source is connected, so GEO is a readiness assessment only." },
+  { name: "Keyword data provider", state: "Not connected", ok: false, help: "Search volume, difficulty and rankings stay 'Unavailable'; keyword analysis is on-page only." },
+  { name: "Report privacy", state: s.sharedHistory === "enabled" ? "Shared history" : "Per browser", ok: true, help: "By default each browser only sees its own audits. AUDIT_SHARED_HISTORY=1 shares history between everyone who can open the app (use with APP_PASSWORD)." },
   { name: "Access password", state: s.accessGate === "enabled" ? "Enabled" : "Disabled", ok: s.accessGate === "enabled", help: "Set APP_PASSWORD (and optionally APP_USERNAME) to require login before deploying publicly." },
 ];
 
-export default function Settings() {
+export default async function Settings({ searchParams }: { searchParams: Promise<{ gsc?: string }> }) {
   const s = integrationStatus();
+  const { gsc: notice } = await searchParams;
+  const gsc = await connectionStatus(await currentOwnerId());
   return (
     <div className="space-y-6">
       <div>
@@ -35,6 +41,10 @@ export default function Settings() {
             </div>
           ))}
         </CardContent>
+      </Card>
+      <Card id="search-console">
+        <CardHeader><CardTitle>Google Search Console</CardTitle><CardDescription>Optional OAuth connection used for search performance data and URL Inspection on verified properties.</CardDescription></CardHeader>
+        <CardContent><GscConnect configured={gsc.configured} connected={gsc.connected} connectedAt={gsc.connectedAt} notice={typeof notice === "string" ? notice : undefined} /></CardContent>
       </Card>
       <Card>
         <CardHeader><CardTitle>Scoring weights</CardTitle><CardDescription>Methodology {METHODOLOGY_VERSION}. Edit lib/scoring/weights.ts to change them; the version is stored with each audit.</CardDescription></CardHeader>

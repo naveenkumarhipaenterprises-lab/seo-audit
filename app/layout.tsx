@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/app-shell";
 import { APP_NAME, APP_TAGLINE } from "@/lib/config";
-import { getStore } from "@/lib/store";
+import { latestReportSummary } from "@/lib/server-data";
 import { hostOf } from "@/lib/utils";
 
 export const metadata: Metadata = {
@@ -14,7 +14,7 @@ export const viewport: Viewport = { width: "device-width", initialScale: 1, them
 export const dynamic = "force-dynamic";
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const latest = (await getStore().list(1))[0];
+  const latest = await latestReportSummary();
   return (
     <html lang="en">
       <body className="font-sans antialiased">

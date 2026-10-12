@@ -2,13 +2,15 @@
 import { useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { CheckResult, CheckStatus } from "@/lib/audit/types";
-import { SeverityBadge, StatusBadge } from "@/components/ui/badge";
+import { SOURCE_LABELS } from "@/lib/audit/types";
+import { sourceOf } from "@/lib/audit/record-utils";
+import { SeverityBadge, SourceBadge, StatusBadge } from "@/components/ui/badge";
 import { cn, safeHref } from "@/lib/utils";
 
 const ORDER: Record<CheckStatus, number> = { fail: 0, warning: 1, not_tested: 2, info: 3, pass: 4, not_applicable: 5 };
 const SEV = { critical: 0, high: 1, medium: 2, low: 3 };
 const FILTERS: { key: "all" | "issues" | CheckStatus; label: string }[] = [
-  { key: "all", label: "All" }, { key: "issues", label: "Issues" }, { key: "pass", label: "Passed" }, { key: "not_tested", label: "Not tested" },
+  { key: "all", label: "All" }, { key: "issues", label: "Issues" }, { key: "pass", label: "Passed" }, { key: "not_tested", label: "Not tested" }, { key: "not_applicable", label: "N/A" },
 ];
 
 function Evidence({ text }: { text: string }) {
@@ -24,7 +26,8 @@ function Evidence({ text }: { text: string }) {
   );
 }
 
-export function CheckItem({ c }: { c: CheckResult }) {
+export function CheckItem({ c, actions, state }: { c: CheckResult; actions?: React.ReactNode; state?: string }) {
+  const src = sourceOf(c);
   return (
     <details className="group rounded-lg border border-slate-200 bg-white open:shadow-sm">
       <summary className="flex cursor-pointer list-none items-start gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
@@ -34,6 +37,9 @@ export function CheckItem({ c }: { c: CheckResult }) {
             <span className="font-medium text-slate-900">{c.title}</span>
             <StatusBadge status={c.status} />
             {(c.status === "fail" || c.status === "warning") && <SeverityBadge severity={c.severity} />}
+            <SourceBadge source={src} />
+            {c.affectedUrls && c.affectedUrls.length > 1 && <span className="text-xs text-slate-500">{c.affectedUrls.length} pages</span>}
+            {state && <span className="rounded-md bg-slate-800 px-2 py-0.5 text-xs font-medium text-white">{state}</span>}
           </div>
           <p className="mt-0.5 text-sm text-slate-600">{c.explanation}</p>
         </div>
@@ -51,8 +57,17 @@ export function CheckItem({ c }: { c: CheckResult }) {
           <div><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recommended fix</p><p className="text-slate-700">{c.recommendation}</p></div>
           <div><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Detection method</p><p className="text-slate-700">{c.detection}</p></div>
         </div>
+        {c.affectedUrls && c.affectedUrls.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Affected pages ({c.affectedUrls.length})</p>
+            <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto text-xs">{c.affectedUrls.map((u) => <li key={u}><Evidence text={u} /></li>)}</ul>
+          </div>
+        )}
         {c.limitation && <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-900"><span className="font-semibold">Limitation:</span> {c.limitation}</p>}
-        <p className="break-all text-xs text-slate-400">Affected URL: {c.url} · Check ID: {c.id}</p>
+        <p className="break-all text-xs text-slate-400">
+          Source: {SOURCE_LABELS[src]} · Category: {c.category} · Check ID: {c.id}{c.detectedAt ? ` · Detected ${new Date(c.detectedAt).toISOString().replace("T", " ").slice(0, 16)} UTC` : ""} · URL: {c.url}
+        </p>
+        {actions}
       </div>
     </details>
   );

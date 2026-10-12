@@ -33,8 +33,38 @@ export interface ParsedPage {
   addressElements: number;
   hasForms: boolean;
   siteName: string | null;
+  /** Structural and accessibility signals detectable in static HTML. */
+  a11y: A11ySignals;
+  /** Distinct phone numbers (tel: links) and email addresses (mailto: links) on the page. */
+  phones: string[];
+  emails: string[];
+  /** Raw <meta charset> / http-equiv declaration, if any. */
+  declaredCharset: string | null;
 }
 
+export interface A11ySignals {
+  hasMain: boolean;
+  landmarks: string[];
+  duplicateIds: string[];
+  unlabeledControls: string[];
+  unnamedButtons: number;
+  emptyLinks: number;
+  iframesWithoutTitle: number;
+  positiveTabindex: number;
+  skipLink: boolean;
+  autoplayMedia: number;
+  formControls: number;
+  /** Suspicious markup patterns: nested forms, <a> inside <a>, inline event handlers count, deprecated tags. */
+  suspicious: string[];
+}
+
+const safeDecode = (s: string) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
 const clean = (s: string | undefined | null) => (s || "").replace(/\s+/g, " ").trim();
 
 function absolutize(href: string, base: URL): string | null {
@@ -222,6 +252,60 @@ export function parsePage(html: string, pageUrl: string): ParsedPage {
     hreflang,
   };
 
+  // ---- Accessibility and HTML structure (static HTML only; contrast and focus order need a browser).
+  const idCounts = new Map<string, number>();
+  $("[id]").each((_, el) => {
+    const id = ($(el).attr("id") || "").trim();
+    if (id) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+  });
+  const duplicateIds = Array.from(idCounts.entries()).filter(([, n]) => n > 1).map(([id, n]) => `#${id} (×${n})`);
+  const labelFor = new Set($("label[for]").toArray().map((el) => $(el).attr("for") || ""));
+  const unlabeledControls: string[] = [];
+  const controls = $("input, select, textarea").toArray().filter((el) => {
+    const t = ($(el).attr("type") || "").toLowerCase();
+    return !["hidden", "submit", "button", "reset", "image"].includes(t);
+  });
+  for (const el of controls) {
+    const $el = $(el);
+    const id = $el.attr("id");
+    const named =
+      (id && labelFor.has(id)) || $el.parents("label").length > 0 || clean($el.attr("aria-label")) || $el.attr("aria-labelledby") || clean($el.attr("title"));
+    if (!named) unlabeledControls.push(`<${el.tagName}${$el.attr("name") ? ` name="${clean($el.attr("name")).slice(0, 40)}"` : ""}${$el.attr("type") ? ` type="${$el.attr("type")}"` : ""}>`);
+  }
+  const unnamedButtons = $("button, [role='button'], input[type='submit'], input[type='button']").toArray().filter((el) => {
+    const $el = $(el);
+    if (el.tagName === "input") return !clean($el.attr("value")) && !clean($el.attr("aria-label"));
+    return !clean($el.text()) && !clean($el.attr("aria-label")) && !$el.attr("aria-labelledby") && !clean($el.attr("title")) && !clean($el.find("img[alt]").attr("alt"));
+  }).length;
+  const emptyLinks = $("a[href]").toArray().filter((el) => {
+    const $el = $(el);
+    return !clean($el.text()) && !clean($el.attr("aria-label")) && !$el.attr("aria-labelledby") && !clean($el.attr("title")) && !clean($el.find("img[alt]").attr("alt"));
+  }).length;
+  const landmarks = Array.from(new Set($("main, nav, header, footer, aside, [role='main'], [role='navigation'], [role='banner'], [role='contentinfo']").toArray().map((el) => $(el).attr("role") || el.tagName)));
+  const suspicious: string[] = [];
+  if ($("form form").length) suspicious.push(`${$("form form").length} nested <form> element(s)`);
+  if ($("a a").length) suspicious.push(`${$("a a").length} link(s) nested inside another link`);
+  const deprecated = $("center, font, marquee, blink, frameset, frame").length;
+  if (deprecated) suspicious.push(`${deprecated} deprecated presentational element(s) (center/font/marquee/frame)`);
+  if ($("body").length === 0) suspicious.push("No <body> element in the source HTML");
+  if ($("head > title").length === 0 && titles.length) suspicious.push("<title> appears outside <head>");
+  const a11y: A11ySignals = {
+    hasMain: $("main, [role='main']").length > 0,
+    landmarks,
+    duplicateIds: duplicateIds.slice(0, 30),
+    unlabeledControls: unlabeledControls.slice(0, 30),
+    unnamedButtons,
+    emptyLinks,
+    iframesWithoutTitle: $("iframe").toArray().filter((el) => !clean($(el).attr("title")) && !clean($(el).attr("aria-label"))).length,
+    positiveTabindex: $("[tabindex]").toArray().filter((el) => Number($(el).attr("tabindex")) > 0).length,
+    skipLink: $("a[href^='#']").toArray().slice(0, 5).some((el) => /skip|jump to|main content/i.test(clean($(el).text()))),
+    autoplayMedia: $("video[autoplay]:not([muted]), audio[autoplay]").length,
+    formControls: controls.length,
+    suspicious,
+  };
+  const phones = Array.from(new Set($('a[href^="tel:" i]').toArray().map((el) => ($(el).attr("href") || "").slice(4).replace(/[^\d+]/g, "")).filter((x) => x.length >= 6))).slice(0, 20);
+  const emails = Array.from(new Set($('a[href^="mailto:" i]').toArray().map((el) => safeDecode(($(el).attr("href") || "").slice(7).split("?")[0]).trim().toLowerCase()).filter((x) => x.includes("@")))).slice(0, 20);
+
   return {
     summary,
     links,
@@ -247,5 +331,9 @@ export function parsePage(html: string, pageUrl: string): ParsedPage {
     addressElements,
     hasForms: $("form").length > 0,
     siteName: og["og:site_name"] || null,
+    a11y,
+    phones,
+    emails,
+    declaredCharset: summary.charset,
   };
 }

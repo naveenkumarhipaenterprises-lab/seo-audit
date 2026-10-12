@@ -101,6 +101,93 @@ export function geoChecks(ctx: CheckContext): CheckResult[] {
       suspicious ? "Server-render important content; enable rendering in the audit to confirm." : "Enable JavaScript rendering to compare raw and rendered content.",
       "Raw HTML word count and script count.", [], "Without a rendered comparison this is an indicator, not a measurement."));
   }
+  out.push(...businessChecks(ctx));
+  return out;
+}
+
+const norm = (s: string) => s.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+/** Business types the user may enter, mapped to the schema.org types that would be relevant. */
+const BUSINESS_TYPES: [RegExp, RegExp, string][] = [
+  [/restaurant|cafe|café|bakery|bar\b|pub|food/i, /Restaurant|FoodEstablishment|CafeOrCoffeeShop|Bakery|BarOrPub|LocalBusiness/, "Restaurant (or another FoodEstablishment type)"],
+  [/shop|store|retail|boutique|market/i, /Store|LocalBusiness|OnlineStore|Organization/, "Store / OnlineStore"],
+  [/hotel|hostel|resort|lodg|guest ?house|b&b/i, /LodgingBusiness|Hotel|Resort|Hostel|LocalBusiness/, "LodgingBusiness / Hotel"],
+  [/dent|doctor|clinic|medical|physio|hospital|pharmacy/i, /MedicalBusiness|Dentist|Physician|MedicalClinic|Hospital|Pharmacy|LocalBusiness|MedicalOrganization/, "MedicalBusiness subtype (e.g. Dentist, MedicalClinic)"],
+  [/law|legal|attorney|solicitor/i, /LegalService|Attorney|LocalBusiness/, "LegalService"],
+  [/plumb|electric|roof|hvac|cleaning|contractor|repair|mechanic|salon|spa|gym|fitness/i, /LocalBusiness|HomeAndConstructionBusiness|AutomotiveBusiness|HealthAndBeautyBusiness|SportsActivityLocation/, "a LocalBusiness subtype"],
+  [/saas|software|agency|consult|b2b|startup|manufactur|wholesale|exporter|company/i, /Organization|Corporation|LocalBusiness/, "Organization"],
+];
+
+function businessChecks(ctx: CheckContext): CheckResult[] {
+  const b = (id: string, title: string, status: CheckResult["status"], sev: CheckResult["severity"], expl: string, rec: string, det: string, ev: string[] = [], lim?: string): CheckResult =>
+    ({ ...builder("geo", "Business details", ctx.url)(id, title, status, sev, expl, rec, det, ev, lim), source: "assessment" });
+  const out: CheckResult[] = [];
+  const p = ctx.parsed;
+  const text = norm(p.text);
+  const raw = p.jsonLd.map((j) => j.raw).join(" ");
+  const name = (ctx.input.businessName || "").trim();
+  if (name) {
+    const n = norm(name);
+    const found = [
+      norm(p.summary.title || "").includes(n) && "title",
+      norm(p.siteName || "").includes(n) && "og:site_name",
+      orgNames(p.jsonLd).some((o) => norm(o).includes(n) || n.includes(norm(o))) && "Organization structured data",
+      text.includes(n) && "visible text",
+    ].filter(Boolean) as string[];
+    out.push(b("geo-business-name", "Business name is stated consistently", found.length >= 2 ? "pass" : found.length ? "warning" : "fail", "medium",
+      found.length >= 2 ? `"${name}" appears in ${found.join(", ")}.` : found.length ? `"${name}" appears only in ${found[0]}.` : `"${name}" does not appear in the title, og:site_name, structured data or visible text of this page.`,
+      found.length >= 2 ? "No action needed." : "State the business name clearly in visible text and use the same name in the title suffix, og:site_name and Organization markup.",
+      "Case-insensitive match of the business name you entered.", found.map((f) => `Found in ${f}`), "Based on the name entered with the audit."));
+  }
+  const loc = (ctx.input.businessLocation || "").trim();
+  if (loc) {
+    const parts = loc.split(/[,;]/).map((x) => norm(x)).filter((x) => x.length > 1);
+    const inText = parts.filter((x) => text.includes(x));
+    const inSchema = parts.filter((x) => norm(raw).includes(x));
+    out.push(b("geo-business-location", "Business location is visible", inText.length || inSchema.length ? (inText.length ? "pass" : "warning") : "warning", "low",
+      inText.length ? `The location (${inText.join(", ")}) appears in the page text${inSchema.length ? " and structured data" : ""}.` : inSchema.length ? "The location appears only in structured data, not in visible text." : `The location "${loc}" was not found in the page text or structured data.`,
+      inText.length ? "No action needed." : "Show the service area or address in visible content (and in LocalBusiness address markup if you serve customers locally).",
+      "Matched the location you entered against visible text and JSON-LD.", [], "Only this page is checked; the location may appear on a contact page."));
+  }
+  const type = (ctx.input.businessType || "").trim();
+  if (type) {
+    const match = BUSINESS_TYPES.find(([re]) => re.test(type));
+    if (!match) {
+      out.push(b("geo-business-type", "Structured data fits the business type", "info", "low",
+        `No schema.org mapping is defined for "${type}", so markup relevance was not assessed.`, "Choose the most specific schema.org type that genuinely describes the business.",
+        "Business type entered with the audit."));
+    } else {
+      const fits = ctx.sd.types.some((t) => match[1].test(t));
+      out.push(b("geo-business-type", "Structured data fits the business type", fits ? "pass" : "warning", "low",
+        fits ? `Structured data includes a type consistent with "${type}" (${ctx.sd.types.filter((t) => match[1].test(t)).join(", ")}).` : `No structured data type consistent with "${type}" was found.`,
+        fits ? "No action needed." : `If it reflects the business, add ${match[2]} markup with details that match the visible page. Do not add types that do not describe the business.`,
+        "Compared JSON-LD types with the business type entered.", ctx.sd.types));
+    }
+  }
+  // Organisation name in markup should match what users see.
+  const orgs = orgNames(p.jsonLd);
+  if (orgs.length) {
+    const visible = orgs.filter((o) => text.includes(norm(o)));
+    out.push(b("geo-schema-matches-content", "Organization markup matches visible content", visible.length ? "pass" : "warning", "low",
+      visible.length ? "The organization name in structured data also appears in the visible page." : "The organization name in structured data does not appear in the visible page text.",
+      visible.length ? "No action needed." : "Make sure structured data describes what users can see on the page.", "Compared Organization/WebSite names in JSON-LD with visible text.", orgs.slice(0, 3)));
+  }
+  // Contradictory contact details across crawled pages.
+  const pages = ctx.sitePages || [{ url: ctx.url, parsed: p }];
+  const phones = new Map<string, Set<string>>();
+  for (const sp of pages) for (const ph of sp.parsed.phones) phones.set(ph, (phones.get(ph) || new Set()).add(sp.url));
+  if (phones.size) {
+    out.push(b("geo-contact-consistency", "Consistent contact details", phones.size > 3 ? "warning" : "pass", "low",
+      phones.size > 3 ? `${phones.size} different phone numbers are linked across ${pages.length} page(s). That can be legitimate (departments, branches) but inconsistent details weaken entity clarity.` : `${phones.size} phone number(s) linked across ${pages.length} page(s).`,
+      phones.size > 3 ? "Use one primary contact number consistently, and label any secondary numbers." : "No action needed.",
+      "Collected tel: links on the crawled pages.", Array.from(phones.entries()).slice(0, 10).map(([ph, urls]) => `${ph} on ${urls.size} page(s)`)));
+  }
+  const claims = (p.mainText.match(/\b(?:the best|#1|number one|world'?s (?:best|leading)|guaranteed|100% (?:safe|natural|pure|organic)|clinically proven|leading provider)\b/gi) || []);
+  const cites = p.links.filter((l) => !l.internal).length;
+  out.push(b("geo-unsupported-claims", "Unsupported superlative claims", claims.length >= 3 && cites === 0 ? "warning" : "pass", "low",
+    claims.length >= 3 && cites === 0 ? `${claims.length} superlative or absolute claims were found with no external references on the page.` : claims.length ? `${claims.length} superlative claim(s) found${cites ? "; the page also links to external sources" : ""}.` : "No strong superlative claims were found.",
+    claims.length >= 3 && cites === 0 ? "Back strong claims with evidence (certifications, data, sources) or soften them." : "No action needed.",
+    "Matched common superlative and absolute phrases in the main content.", Array.from(new Set(claims.map((c) => c.toLowerCase()))).slice(0, 10),
+    "Phrase matching cannot tell whether a claim is substantiated elsewhere."));
   return out;
 }
 

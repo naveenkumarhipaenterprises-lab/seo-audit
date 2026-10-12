@@ -2,10 +2,12 @@ import "server-only";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import PDFDocument from "pdfkit";
-import type { AuditRecord, CheckResult, CheckStatus } from "../audit/types";
-import { CATEGORY_LABELS } from "../audit/types";
+import type { AuditRecord, Category, CheckResult, CheckStatus } from "../audit/types";
+import { CATEGORY_LABELS, SOURCE_LABELS } from "../audit/types";
+import { sourceOf, statusLabel } from "../audit/record-utils";
+import { SNAPSHOT_CATEGORIES } from "../audit/snapshot-categories";
 import { prioritizedIssues } from "../scoring/score";
-import { SEVERITY_WEIGHTS, STATUS_CREDIT } from "../scoring/weights";
+import { OVERALL_WEIGHTS, SCORE_NOTICE, SEO_COMPONENT_WEIGHTS, SEVERITY_WEIGHTS, STATUS_CREDIT } from "../scoring/weights";
 import { APP_NAME, APP_TAGLINE } from "../config";
 
 const C = {
@@ -26,6 +28,13 @@ function loadFonts() {
 
 /** Lets long URLs wrap: PDFKit only breaks at spaces/soft breaks. */
 const wrapUrl = (s: string) => s.replace(/([/?&=._-])/g, "$1​");
+const STOP_REASON: Record<string, string> = {
+  complete: "every discoverable page within the limits was processed",
+  page_limit: "the maximum page limit was reached",
+  time_budget: "the crawl time budget was reached",
+  cancelled: "the audit was cancelled",
+  not_run: "the crawl did not run",
+};
 const fmtScore = (n: number | null) => (n === null ? "Not tested" : `${n}/100`);
 
 export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
@@ -115,20 +124,29 @@ export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
   };
   const byGroup = (cat: CheckResult["category"], groups?: string[]) => r.checks.filter((c) => c.category === cat && (!groups || groups.includes(c.group)));
 
-  // 1-2. Cover
+  const t = r.scores.totals;
+  const full = r.input.mode === "full";
+  const pagesAnalysed = r.pages?.filter((x) => !x.error).length || r.pagesCrawled;
+  const tested = t.tested ?? t.passed + t.warnings + t.errors;
+  const notApplicable = t.notApplicable ?? r.checks.filter((c) => c.status === "not_applicable").length;
+  const partial = r.status === "partial";
+  const when = (iso: string) => new Date(iso).toUTCString();
+
+  // 1-3. Cover: product, URL, audit date
   doc.rect(0, 0, doc.page.width, 8).fill(C.blue);
   doc.font("B").fontSize(26).fillColor(C.blue).text(APP_NAME, L, 140, { width: W });
   doc.font("R").fontSize(11).fillColor(C.muted).text(APP_TAGLINE, { width: W }).moveDown(2);
-  doc.font("B").fontSize(20).fillColor(C.text).text("Website Visibility Audit", { width: W }).moveDown(0.6);
+  doc.font("B").fontSize(20).fillColor(C.text).text(full ? "Full Site Audit Report" : "Quick Audit Report", { width: W }).moveDown(0.6);
   doc.font("R").fontSize(11).fillColor(C.text).text(wrapUrl(r.finalUrl), { width: W });
   if (r.finalUrl !== r.requestedUrl) doc.fontSize(9).fillColor(C.muted).text(`Requested: ${wrapUrl(r.requestedUrl)}`, { width: W });
-  doc.moveDown(0.6).fontSize(10).fillColor(C.muted).text(`Audit date: ${new Date(r.completedAt).toUTCString()}`, { width: W });
-  doc.text(`Methodology version: ${r.scores.methodologyVersion}   ·   Pages crawled: ${r.pagesCrawled}`, { width: W });
-  if (r.status === "partial") {
-    doc.moveDown(1).font("B").fontSize(11).fillColor(C.warning).text("PARTIAL REPORT: some analyses were not completed. See \"Limitations and unavailable data\".", { width: W });
-  }
+  doc.moveDown(0.6).fontSize(10).fillColor(C.muted).text(`Audit started: ${when(r.createdAt)}`, { width: W });
+  doc.text(`Audit completed: ${when(r.completedAt)}`, { width: W });
+  doc.text(`Status: ${statusLabel(r.status)}   ·   Pages analysed: ${pagesAnalysed}`, { width: W });
+  doc.text(`Methodology ${r.scores.methodologyVersion}${r.engineVersion ? `   ·   Engine ${r.engineVersion}` : ""}`, { width: W });
+  if (partial) doc.moveDown(1).font("B").fontSize(11).fillColor(C.warning).text("PARTIALLY COMPLETED REPORT: some analyses did not finish. See \"Data sources and limitations\".", { width: W });
+  else if (r.status === "completed_with_warnings") doc.moveDown(1).font("B").fontSize(11).fillColor(C.warning).text("COMPLETED WITH WARNINGS: see \"Data sources and limitations\".", { width: W });
   doc.moveDown(3);
-  const boxes: [string, number | null][] = [["Overall visibility", r.scores.overall.score], ["SEO", r.scores.seo.score], ["AEO", r.scores.categories.aeo.score], ["GEO", r.scores.categories.geo.score]];
+  const boxes: [string, number | null][] = [["Overall health", r.scores.overall.score], ["SEO", r.scores.seo.score], ["AEO readiness", r.scores.categories.aeo.score], ["GEO readiness", r.scores.categories.geo.score]];
   const bw = (W - 30) / 4;
   const by = doc.y;
   boxes.forEach(([label, v], i) => {
@@ -139,16 +157,40 @@ export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
   });
   doc.y = by + 100;
   doc.x = L;
-  p("Scores represent this application's diagnostic model. They are not official Google, ChatGPT or other search engine scores.", { color: C.muted, size: 8.5 });
+  p(SCORE_NOTICE, { color: C.muted, size: 8.5 });
 
-  // 3-4. Scores
+  // 4. Audit configuration
   doc.addPage();
-  h1("Scores");
+  h1("Audit configuration");
+  const inp = r.input;
+  table([{ header: "Setting", width: 30 }, { header: "Value", width: 70 }], [
+    ["Mode", full ? `Full Site Audit (max ${inp.maxPages} pages, depth ${inp.maxDepth})` : "Quick Audit (single page)"],
+    ["Primary keyword", inp.primaryKeyword || "None"],
+    ["Secondary keywords", (inp.secondaryKeywords ?? []).join(", ") || "None"],
+    ["Competitor URLs", (inp.competitorUrls ?? []).join(", ") || "None"],
+    ["Business details", [inp.businessName, inp.businessLocation, inp.businessType].filter(Boolean).join(" · ") || "Not provided"],
+    ["Performance test", inp.runPerformance ? `PageSpeed Insights, ${inp.performanceStrategy}` : "Off"],
+    ["Browser rendering", inp.renderJs ? "Requested" : "Off"],
+    ["robots.txt", inp.respectRobots ? "Respected" : "Not respected (site-owner override)"],
+    ["External link checks", inp.checkExternalLinks ? "On" : "Off"],
+    ["Search Console", inp.useSearchConsole ? "Requested" : "Not used"],
+  ]);
+
+  // 5. Executive overview
+  h1("Executive overview");
+  p(`${APP_NAME} ran ${r.checks.length} checks on ${pagesAnalysed} page(s) of ${r.finalUrl}: ${t.passed} passed, ${t.warnings} warnings, ${t.errors} failed (${t.critical} critical, ${t.high} high severity), ${t.notTested} skipped or not tested and ${notApplicable} not applicable.`);
+  p(`The start page returned HTTP ${r.httpStatus ?? "—"}${r.redirects.length ? ` after ${r.redirects.length} redirect(s)` : ""}${r.responseTimeMs !== null ? ` in ${r.responseTimeMs} ms` : ""}, with ${r.page?.mainWordCount ?? 0} words of main content, ${r.images.length} images${full ? " across crawled pages" : ""} and ${r.links.internal} internal links.`);
+  const top = prioritizedIssues(r.checks).slice(0, 5);
+  if (top.length) p(`Top priorities: ${top.map((c) => c.title).join("; ")}.`);
+  else p("No failed or warning checks were found.");
+
+  // 6. Scores
+  h1("Overall and category scores");
   table(
-    [{ header: "Category", width: 40 }, { header: "Score", width: 15 }, { header: "Points earned / possible", width: 25 }, { header: "Pass / Warn / Fail / Not tested", width: 30 }],
-    Object.values(r.scores.categories).map((c) => [c.label, fmtScore(c.score), c.category === "performance" ? "Lighthouse score (mean of tested strategies)" : `${c.earned} / ${c.possible}`, `${c.counts.pass} / ${c.counts.warning} / ${c.counts.fail} / ${c.counts.not_tested}`]),
+    [{ header: "Category", width: 34 }, { header: "Score", width: 16 }, { header: "Points earned / possible", width: 22 }, { header: "Pass / Warn / Fail / Skipped / N/A", width: 28 }],
+    Object.values(r.scores.categories).map((c) => [c.label, fmtScore(c.score), c.category === "performance" ? "Lighthouse score (mean of tested strategies)" : `${c.earned} / ${c.possible}`, `${c.counts.pass} / ${c.counts.warning} / ${c.counts.fail} / ${c.counts.not_tested} / ${c.counts.not_applicable ?? 0}`]),
   );
-  h2("Overall Visibility Score");
+  h2("Overall audit health");
   table(
     [{ header: "Component", width: 30 }, { header: "Score", width: 20 }, { header: "Configured weight", width: 20 }, { header: "Effective weight", width: 15 }, { header: "Contribution", width: 15 }],
     r.scores.overall.components.map((c) => [c.name, fmtScore(c.score), `${c.weight}%`, `${c.effectiveWeight}%`, c.contribution === null ? "—" : String(c.contribution)]),
@@ -158,33 +200,64 @@ export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
     [{ header: "Component", width: 40 }, { header: "Score", width: 20 }, { header: "Weight", width: 20 }, { header: "Contribution", width: 20 }],
     r.scores.seo.components.map((c) => [CATEGORY_LABELS[c.category], fmtScore(c.score), String(c.weight), c.contribution === null ? "—" : String(c.contribution)]),
   );
+  if (r.competitors?.length) {
+    h2("Competitor comparison (same reduced check set, home pages fetched once)");
+    const cols = [r.siteSnapshot, ...r.competitors].filter(Boolean) as NonNullable<AuditRecord["siteSnapshot"]>[];
+    table(
+      [{ header: "Site", width: 30 }, ...SNAPSHOT_CATEGORIES.slice(0, 6).map((c) => ({ header: CATEGORY_LABELS[c], width: 70 / 6 }))],
+      cols.map((s, i) => [i === 0 && r.siteSnapshot ? `This site (${s.url})` : s.url, ...SNAPSHOT_CATEGORIES.slice(0, 6).map((c) => (s.status === "ok" ? fmtScore(s.scores[c] ?? null) : s.status === "blocked" ? "Not fetched" : "Error"))]),
+    );
+    p("No traffic, ranking or backlink data is estimated for competitors.", { color: C.muted, size: 8.5 });
+  }
 
-  // 5. Methodology
-  h1("Scoring methodology and limitations");
-  p(r.scores.overall.formula);
-  p(`Each check is worth points by severity (critical ${SEVERITY_WEIGHTS.critical}, high ${SEVERITY_WEIGHTS.high}, medium ${SEVERITY_WEIGHTS.medium}, low ${SEVERITY_WEIGHTS.low}). Pass earns ${STATUS_CREDIT.pass * 100}%, warning ${STATUS_CREDIT.warning * 100}%, fail ${STATUS_CREDIT.fail * 100}%. Not applicable, informational and not-tested checks are excluded from the denominator. Each check belongs to exactly one category, so no issue is scored twice. Performance uses the Lighthouse performance score directly.`);
-  p("Length, count and structure guidance is diagnostic. It is not a statement about Google ranking penalties.", { color: C.muted });
+  // 7. Pages analysed
+  h1("Pages analysed");
+  if (r.crawl?.enabled) {
+    p(`Discovered ${r.crawl.discovered} URL(s); processed ${r.crawl.processed}; failed ${r.crawl.failed}; skipped by robots.txt ${r.crawl.skippedRobots}; sitemap seeds used ${r.crawl.sitemapUrlsUsed}. Crawl stopped because: ${STOP_REASON[r.crawl.stopReason] ?? r.crawl.stopReason}. Duration ${Math.round(r.crawl.durationMs / 1000)} s.`);
+  } else p(`Quick Audit: ${pagesAnalysed} page analysed (the submitted URL).`);
+  if (r.pages?.length) {
+    table(
+      [{ header: "URL", width: 40 }, { header: "Status", width: 8 }, { header: "Depth", width: 7 }, { header: "Words", width: 8 }, { header: "Indexability signals", width: 14 }, { header: "Issues", width: 23 }],
+      r.pages.slice(0, 200).map((pg) => [pg.finalUrl, pg.error ? (pg.error.startsWith("Blocked by robots") ? "Not fetched" : "Error") : String(pg.status ?? "—"), String(pg.depth), String(pg.wordCount), pg.indexable === null ? "Unknown" : pg.indexable ? "Indexable" : pg.noindex ? "noindex" : "Not indexable", pg.error || pg.issues.slice(0, 4).join("; ") || "—"]),
+    );
+    if (r.pages.length > 200) p(`…and ${r.pages.length - 200} more pages (see CSV export).`, { color: C.muted });
+  }
 
-  // 6. Executive summary
-  h1("Executive summary");
-  const t = r.scores.totals;
-  p(`${APP_NAME} ran ${r.checks.length} checks on ${r.finalUrl}: ${t.passed} passed, ${t.warnings} warnings, ${t.errors} errors (${t.critical} critical, ${t.high} high severity) and ${t.notTested} not tested.`);
-  p(`The page returned HTTP ${r.httpStatus}${r.redirects.length ? ` after ${r.redirects.length} redirect(s)` : ""}, in ${r.responseTimeMs} ms, with ${r.page?.mainWordCount ?? 0} words of main content, ${r.images.length} images and ${r.links.internal} internal links.`);
-  const top = prioritizedIssues(r.checks).slice(0, 5);
-  if (top.length) p(`Top priorities: ${top.map((c) => c.title).join("; ")}.`);
+  // 8. Passed and failed checks
+  h1("Passed and failed checks");
+  table([{ header: "Result", width: 50 }, { header: "Checks", width: 50 }], [
+    ["Tested (pass + warning + fail)", String(tested)], ["Passed", String(t.passed)], ["Warnings", String(t.warnings)], ["Failed", String(t.errors)],
+    ["Skipped / not tested", String(t.notTested)], ["Not applicable", String(notApplicable)], ["Informational", String(t.info ?? r.checks.filter((c) => c.status === "info").length)],
+  ]);
+  const passed = r.checks.filter((c) => c.status === "pass");
+  if (passed.length) p(`Passed: ${passed.map((c) => c.title).join("; ")}.`, { size: 8.5, color: C.muted });
 
-  // 7. Critical & high
-  h1("Critical errors and high-priority warnings");
+  // 9. Critical & high
+  h1("Critical and high-priority issues");
   checkTable(prioritizedIssues(r.checks).filter((c) => c.severity === "critical" || c.severity === "high"));
 
-  // 8-10. Technical
+  // 10. Technical SEO
   h1("Technical SEO results");
-  checkTable(byGroup("technical", ["HTTP & security", "Links", "Structured data"]));
-  h1("Metadata and headings");
+  checkTable(r.checks.filter((c) => c.category === "technical" && c.group !== "Indexability"));
+  h2("Accessibility (automated HTML checks)");
+  checkTable(byGroup("accessibility"));
+  h2("Security headers and HTTPS");
+  if (r.security) {
+    table([{ header: "Header / check", width: 35 }, { header: "Observed value", width: 65 }], [
+      ["HTTP → HTTPS", r.security.httpRedirectsToHttps === null ? (r.security.httpRefused ? "Plain HTTP is not served" : "Not determined") : r.security.httpRedirectsToHttps ? "Redirects to HTTPS" : "Does not redirect"],
+      ...Object.entries(r.security.headers).map(([k, v]) => [k, v ? (v.length > 200 ? v.slice(0, 199) + "…" : v) : "Not set"]),
+    ]);
+  }
+  checkTable(byGroup("security"));
+  p("These are limited public checks, not a security assessment or penetration test.", { color: C.muted, size: 8.5 });
+
+  // 11. Metadata and indexability
+  h1("Metadata and indexability findings");
   if (r.page) {
-    table([{ header: "Field", width: 25 }, { header: "Value", width: 75 }], [
+    table([{ header: "Field (start page)", width: 25 }, { header: "Value", width: 75 }], [
       ["Title", r.page.title ?? "Missing"], ["Meta description", r.page.metaDescription ?? "Missing"], ["Canonical", r.page.canonical ?? "Missing"],
-      ["Meta robots", r.page.robotsMeta.join("; ") || "None"], ["X-Robots-Tag", r.page.xRobotsTag ?? "None"], ["Language", r.page.lang ?? "Not set"], ["Viewport", r.page.viewport ?? "Missing"],
+      ["Meta robots", r.page.robotsMeta.join("; ") || "None"], ["X-Robots-Tag", r.page.xRobotsTag ?? "None"], ["Language", r.page.lang ?? "Not set"],
+      ["Charset", r.page.charset ?? "Not declared"], ["Viewport", r.page.viewport ?? "Missing"],
       ["H1", r.page.headings.filter((h) => h.level === 1).map((h) => h.text).join(" | ") || "Missing"],
     ]);
     if (r.page.headings.length) {
@@ -192,41 +265,52 @@ export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
       table([{ header: "Level", width: 10 }, { header: "Text", width: 90 }], r.page.headings.slice(0, 60).map((h) => [`H${h.level}`, h.text || "(empty)"]));
     }
   }
-  checkTable(byGroup("technical", ["Metadata", "Headings"]));
-  h1("Canonical and indexability analysis");
-  p("Google indexing status not verified — connect Google Search Console.", { bold: true, color: C.warning });
+  checkTable(byGroup("onpage"));
+  h2("Indexability");
+  const gsc = r.searchConsole;
+  if (gsc?.status === "ok") {
+    p(`Google Search Console property ${gsc.property}, ${gsc.dateRange ? `${gsc.dateRange.start} to ${gsc.dateRange.end}` : ""}, retrieved ${gsc.retrievedAt ? when(gsc.retrievedAt) : "—"}.`);
+    if (gsc.totals) p(`Property totals: ${gsc.totals.clicks} clicks, ${gsc.totals.impressions} impressions, CTR ${(gsc.totals.ctr * 100).toFixed(1)}%, average position ${gsc.totals.position.toFixed(1)}.`);
+    if (gsc.inspection && !gsc.inspection.error) p(`URL Inspection: ${gsc.inspection.verdict ?? "—"}${gsc.inspection.coverageState ? `, ${gsc.inspection.coverageState}` : ""}${gsc.inspection.lastCrawlTime ? `, last crawled ${when(gsc.inspection.lastCrawlTime)}` : ""}.`);
+  } else {
+    p(`Not verified through Search Console. ${gsc?.message || ""}`.trim(), { bold: true, color: C.warning });
+    p("HTTP 200 and the absence of noindex are indexability signals only; they do not show whether Google has indexed the page.", { color: C.muted, size: 8.5 });
+  }
   checkTable(byGroup("technical", ["Indexability"]));
 
-  // 11. Images
-  h1("Image URLs and ALT analysis");
+  // 12. Images
+  h1("Image audit");
   checkTable(byGroup("images"));
   if (r.images.length) {
     table(
-      [{ header: "Image URL", width: 46 }, { header: "ALT", width: 24 }, { header: "Status", width: 8 }, { header: "Size", width: 10 }, { header: "Dimensions", width: 12 }],
-      r.images.slice(0, 150).map((i) => [i.src, i.altState === "missing" ? "MISSING" : i.altState === "empty" ? '(empty alt="")' : i.alt || "", i.probe?.status ? String(i.probe.status) : i.probe?.unverified ? "Unverified" : i.probe?.error ? "Error" : "Not checked", i.probe?.bytes ? `${Math.round(i.probe.bytes / 1024)} KB` : "—", i.probe?.width ? `${i.probe.width}×${i.probe.height}` : "—"]),
+      [{ header: "Image URL", width: 34 }, { header: "Page", width: 22 }, { header: "ALT", width: 18 }, { header: "Status", width: 8 }, { header: "Type / size", width: 18 }],
+      r.images.slice(0, 150).map((i) => [i.src, i.sourcePage, i.altState === "missing" ? "MISSING" : i.altState === "empty" ? '(empty alt="")' : i.alt || "", i.probe?.status ? String(i.probe.status) : i.probe?.unverified ? "Unverified" : i.probe?.error ? "Error" : "Not checked", [i.probe?.format || i.probe?.contentType?.replace("image/", ""), i.probe?.bytes ? `${Math.round(i.probe.bytes / 1024)} KB` : null].filter(Boolean).join(", ") || "—"]),
     );
     if (r.images.length > 150) p(`…and ${r.images.length - 150} more images (see CSV export).`, { color: C.muted });
   }
 
-  // 12. Keyword
-  h1("Keyword and content analysis");
+  // 13. Content and keywords
+  h1("Content and on-page keyword findings");
   if (r.keyword) {
-    p(`Primary keyword: "${r.keyword.primary}". ${r.keyword.occurrences} occurrence(s), about ${r.keyword.density}% of main-content words.`);
+    p(`Primary keyword: "${r.keyword.primary}". ${r.keyword.occurrences} occurrence(s), about ${r.keyword.density}% of main-content words on the start page.`);
     table([{ header: "Location", width: 50 }, { header: "Found", width: 50 }], r.keyword.placements.map((pl) => [pl.location, pl.found ? `Yes${pl.detail ? ` (${pl.detail})` : ""}` : "No"]));
-    p(`Unavailable without a connected data source: ${r.keyword.unavailable.join(", ")}.`, { color: C.muted });
+    p(`Unavailable without a connected keyword data provider: ${r.keyword.unavailable.join(", ")}.`, { color: C.muted });
   } else p("No target keyword was entered for this audit.", { color: C.muted });
   checkTable(byGroup("content"));
 
-  // 13-14. AEO / GEO
-  h1("AEO readiness findings");
+  // 14. AEO
+  h1("AEO readiness assessment");
+  p("The AEO score is this tool's assessment of answer readiness from page structure and content. It does not show whether any answer engine uses the page.", { color: C.muted });
   checkTable(byGroup("aeo"));
   if (r.suggestions.questions.length || r.suggestions.answerBlocks.length) {
     h2("Suggested questions and answer blocks");
     p(r.suggestions.note, { color: C.muted, size: 8.5 });
     [...r.suggestions.questions, ...r.suggestions.answerBlocks].forEach((q) => p(`• ${q}`));
   }
-  h1("GEO readiness findings");
-  p("A technical crawl cannot establish whether ChatGPT, Gemini, Perplexity or other AI systems mention or cite this brand. No AI visibility figures are estimated.", { color: C.muted });
+
+  // 15. GEO
+  h1("GEO readiness assessment");
+  p("A technical crawl cannot establish whether ChatGPT, Gemini, Perplexity or other AI systems mention or cite this brand. No AI visibility figures or citations are estimated.", { color: C.muted });
   checkTable(byGroup("geo"));
   h2("Crawler access per robots.txt");
   table(
@@ -234,8 +318,25 @@ export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
     r.aiCrawlers.map((a) => [a.agent, a.operator, a.allowed === null ? "Not evaluated" : a.allowed ? `Allowed${a.hasGroup ? " (own rules)" : ""}` : `Disallowed${a.hasGroup ? " (own rules)" : ""}`, a.purpose]),
   );
 
-  // 15-16. Mobile / performance
-  h1("Mobile responsiveness results");
+  // 16. Performance and mobile
+  h1("Performance results and source");
+  p("Source: Google PageSpeed Insights API (Lighthouse lab data, plus Chrome UX Report field data when Google has enough real-user data).", { color: C.muted });
+  if (!r.performance.length) p("Performance was not tested for this audit.", { color: C.muted });
+  for (const perf of r.performance) {
+    h2(`${perf.strategy === "mobile" ? "Mobile" : "Desktop"}: ${perf.status === "ok" ? `${perf.score}/100` : "Not tested"}${perf.fetchedAt ? ` · collected ${when(perf.fetchedAt)}` : ""}`);
+    if (perf.status !== "ok") {
+      p(perf.error || "Not tested.", { color: C.muted });
+      continue;
+    }
+    if (perf.categories) {
+      table([{ header: "Lighthouse category", width: 50 }, { header: "Score", width: 50 }], [["Performance", fmtScore(perf.categories.performance)], ["Accessibility", fmtScore(perf.categories.accessibility)], ["Best Practices", fmtScore(perf.categories.bestPractices)], ["SEO", fmtScore(perf.categories.seo)]]);
+    }
+    table([{ header: "Lab metric (Lighthouse)", width: 50 }, { header: "Value", width: 50 }], Object.entries(perf.lab).map(([k, v]) => [k, v.display ?? "Unavailable"]));
+    if (perf.field.source === "none") p("Field data: No field data available. INP is reported only from field data and is not estimated.", { color: C.muted });
+    else table([{ header: `Field metric (CrUX, ${perf.field.source}-level, p75)`, width: 50 }, { header: "Value / rating", width: 50 }], Object.entries(perf.field.metrics).map(([k, m]) => [k, `${m.p75 ?? "n/a"}${k === "CLS" ? "" : " ms"} (${m.category ?? "n/a"})`]));
+    if (perf.opportunities.length) table([{ header: "Opportunity", width: 70 }, { header: "Estimated saving", width: 30 }], perf.opportunities.map((o) => [o.title, o.display ?? "—"]));
+  }
+  h2("Mobile usability");
   checkTable(byGroup("mobile"));
   if (r.render.viewports.length) {
     table(
@@ -243,44 +344,59 @@ export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
       r.render.viewports.map((v) => [`${v.name} ${v.width}px`, v.horizontalOverflow ? `Yes (${v.scrollWidth}px)` : "No", `${Math.round(v.smallTextRatio * 100)}%`, `${v.smallTapTargets}/${v.tapTargetsChecked}`, String(v.imagesWiderThanViewport)]),
     );
   }
-  h1("Mobile and desktop performance metrics");
-  for (const perf of r.performance) {
-    h2(`${perf.strategy === "mobile" ? "Mobile" : "Desktop"}: ${perf.status === "ok" ? `${perf.score}/100` : "Not tested"}`);
-    if (perf.status !== "ok") {
-      p(perf.error || "Not tested.", { color: C.muted });
-      continue;
-    }
-    table([{ header: "Lab metric (Lighthouse)", width: 50 }, { header: "Value", width: 50 }], Object.entries(perf.lab).map(([k, v]) => [k, v.display ?? "Unavailable"]));
-    if (perf.field.source === "none") p("Field data (Chrome UX Report): unavailable for this URL and origin. INP is not reported.", { color: C.muted });
-    else table([{ header: `Field metric (CrUX, ${perf.field.source}-level, p75)`, width: 50 }, { header: "Value / rating", width: 50 }], Object.entries(perf.field.metrics).map(([k, m]) => [k, `${m.p75 ?? "n/a"}${k === "CLS" ? "" : " ms"} (${m.category ?? "n/a"})`]));
-  }
-  checkTable(byGroup("performance").filter((c) => c.id.startsWith("perf-score")));
 
-  // 17. Affected URLs
-  h1("Affected URL list");
-  const affected = new Map<string, string[]>();
-  for (const c of r.checks.filter((c) => c.status === "fail" || c.status === "warning")) {
-    for (const e of c.evidence) {
-      const m = e.match(/https?:\/\/\S+/);
-      if (m) affected.set(m[0], [...(affected.get(m[0]) || []), c.title]);
-    }
-    affected.set(c.url, [...(affected.get(c.url) || []), c.title]);
+  // 17. Detailed issue evidence
+  h1("Detailed issue evidence");
+  const issues = prioritizedIssues(r.checks);
+  if (!issues.length) p("No failed or warning checks.", { color: C.muted });
+  for (const c of issues.slice(0, 80)) {
+    const state = r.issueStates?.[c.id];
+    h2(`${c.title} (${STATUS_LABEL[c.status]}, ${c.severity})`);
+    p(`${CATEGORY_LABELS[c.category]} · Source: ${SOURCE_LABELS[sourceOf(c)]}${c.detectedAt ? ` · Detected ${when(c.detectedAt)}` : ""}${state ? ` · Marked ${state.replace("_", " ")}` : ""}`, { color: C.muted, size: 8.5 });
+    p(`Why it matters: ${c.explanation}`);
+    if (c.evidence.length) p(`Evidence: ${c.evidence.slice(0, 6).join(" | ")}`, { size: 8.5 });
+    const urls = c.affectedUrls?.length ? c.affectedUrls : [c.url];
+    p(`Affected URL(s) (${urls.length}): ${urls.slice(0, 8).map(wrapUrl).join(", ")}${urls.length > 8 ? ` and ${urls.length - 8} more` : ""}`, { size: 8.5 });
+    p(`Detection: ${c.detection}${c.limitation ? ` Limitation: ${c.limitation}` : ""}`, { color: C.muted, size: 8.5 });
   }
-  table([{ header: "URL", width: 55 }, { header: "Issues", width: 45 }], Array.from(affected.entries()).slice(0, 200).map(([u, ts]) => [u, Array.from(new Set(ts)).join(", ")]));
+  if (issues.length > 80) p(`…and ${issues.length - 80} more issues (see CSV export).`, { color: C.muted });
 
-  // 18. Priority fixes
+  // 18. Recommended fixes
   h1("Recommended fixes in priority order");
   table(
-    [{ header: "#", width: 5 }, { header: "Issue", width: 25 }, { header: "Severity", width: 10 }, { header: "Recommended fix", width: 60 }],
-    prioritizedIssues(r.checks).map((c, i) => [String(i + 1), c.title, c.severity, c.recommendation]),
+    [{ header: "#", width: 5 }, { header: "Issue", width: 25 }, { header: "Severity", width: 10 }, { header: "Pages", width: 8 }, { header: "Recommended fix", width: 52 }],
+    issues.map((c, i) => [String(i + 1), c.title, c.severity, String(c.affectedUrls?.length || 1), c.recommendation]),
   );
 
-  // 19. Limitations
-  h1("Limitations and unavailable data");
+  // 19. Methodology
+  h1("Methodology");
+  p(r.scores.overall.formula);
+  p(`Each check is worth points by severity (critical ${SEVERITY_WEIGHTS.critical}, high ${SEVERITY_WEIGHTS.high}, medium ${SEVERITY_WEIGHTS.medium}, low ${SEVERITY_WEIGHTS.low}). A pass earns ${STATUS_CREDIT.pass * 100}%, a warning ${STATUS_CREDIT.warning * 100}% and a failure ${STATUS_CREDIT.fail * 100}%. Not applicable, informational and skipped checks are excluded from the denominator, so missing data never counts as a pass or a failure. Each check belongs to exactly one category, so no issue is scored twice. Performance uses the Lighthouse performance score directly.`);
+  p(`SEO score weights: ${Object.entries(SEO_COMPONENT_WEIGHTS).map(([k, v]) => `${CATEGORY_LABELS[k as Category]} ${v}%`).join(", ")}. Overall health weights: ${Object.entries(OVERALL_WEIGHTS).map(([k, v]) => `${k} ${v}%`).join(", ")}. Weights are renormalised over the parts that were tested.`);
+  p("Length, count and structure guidance is diagnostic. It is not a statement about Google ranking penalties.", { color: C.muted });
+
+  // 20. Data sources and limitations
+  h1("Data sources and limitations");
+  p("Every finding is labelled with its source: Observed (measured directly from fetched pages, headers or robots/sitemap files), External (returned by a Google API) or Assessment (this tool's judgement from page signals).");
+  table([{ header: "Source", width: 40 }, { header: "Findings", width: 60 }], (Object.keys(SOURCE_LABELS) as (keyof typeof SOURCE_LABELS)[]).map((k) => [SOURCE_LABELS[k], String(r.checks.filter((c) => sourceOf(c) === k).length)]));
+  if (r.warnings?.length) {
+    h2("Warnings");
+    r.warnings.forEach((w) => p(`• ${w}`));
+  }
+  if (r.partialReasons.length) {
+    h2("Why this report is partial");
+    r.partialReasons.forEach((w) => p(`• ${w}`));
+  }
+  h2("Limitations");
   r.limitations.forEach((l) => p(`• ${l}`));
   table([{ header: "Integration", width: 40 }, { header: "Status", width: 60 }], [
     ["PageSpeed Insights", r.integrations.pagespeed], ["Google Search Console", r.integrations.searchConsole], ["Browser rendering", r.integrations.rendering], ["AI provider", r.integrations.ai], ["Keyword data provider", r.integrations.keywordData],
+    ...(r.integrations.aiVisibility ? [["AI visibility data", r.integrations.aiVisibility]] : []),
   ]);
+  if (r.tasks?.length) {
+    h2("External tasks");
+    table([{ header: "Task", width: 40 }, { header: "Status", width: 15 }, { header: "Detail", width: 45 }], r.tasks.map((x) => [x.label, x.status, x.detail || "—"]));
+  }
 
   // Footer with page numbers on every page.
   const range = doc.bufferedPageRange();
@@ -291,7 +407,7 @@ export async function auditToPdf(r: AuditRecord): Promise<Buffer> {
     const m = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
     doc.font("R").fontSize(7.5).fillColor(C.muted);
-    doc.text(`${APP_NAME} · ${r.finalUrl.length > 70 ? r.finalUrl.slice(0, 69) + "…" : r.finalUrl} · Generated ${generated}${r.status === "partial" ? " · PARTIAL" : ""}`, L, y, { width: W - 60, lineBreak: false });
+    doc.text(`${APP_NAME} · ${r.finalUrl.length > 70 ? r.finalUrl.slice(0, 69) + "…" : r.finalUrl} · Generated ${generated}${r.status === "partial" ? " · PARTIALLY COMPLETED" : ""}`, L, y, { width: W - 60, lineBreak: false });
     doc.text(`Page ${i + 1} of ${range.count}`, L + W - 60, y, { width: 60, align: "right", lineBreak: false });
     doc.page.margins.bottom = m;
   }

@@ -8,8 +8,8 @@ export function technicalChecks(ctx: CheckContext): CheckResult[] {
   const out: CheckResult[] = [];
   const p = ctx.parsed.summary;
   const http = builder("technical", "HTTP & security", ctx.url);
-  const meta = builder("technical", "Metadata", ctx.url);
-  const head = builder("technical", "Headings", ctx.url);
+  const meta = builder("onpage", "Metadata", ctx.url);
+  const head = builder("onpage", "Headings", ctx.url);
   const idx = builder("technical", "Indexability", ctx.url);
   const sdb = builder("technical", "Structured data", ctx.url);
   const lnk = builder("technical", "Links", ctx.url);
@@ -80,7 +80,7 @@ export function technicalChecks(ctx: CheckContext): CheckResult[] {
       p.metaDescriptions.map((d) => `"${truncate(d)}"`)));
   }
   out.push(meta("duplicate-metadata-sitewide", "Duplicate titles/descriptions across pages", "not_tested", "medium",
-    "Detecting duplicates requires crawling multiple pages, which is planned for Phase 2.", "—", "Requires multi-page crawl."));
+    "Detecting duplicates requires crawling multiple pages. Run a Full Site Audit to check this.", "Run a Full Site Audit.", "Requires a multi-page crawl."));
   const og = p.openGraph;
   const ogHave = ["og:title", "og:description", "og:image"].filter((k) => og[k]);
   const twCard = p.twitter["twitter:card"];
@@ -193,8 +193,8 @@ export function technicalChecks(ctx: CheckContext): CheckResult[] {
     sm.includesAuditedUrl === null ? "Could not determine sitemap inclusion (no sitemap, or not all sitemap files were read)." : sm.includesAuditedUrl ? "The audited URL is listed in the sitemap." : "The audited URL is not listed in any sitemap that was read.",
     sm.includesAuditedUrl === false ? "Include canonical, indexable URLs in your sitemap." : "No action needed.", "Compared normalised <loc> values with the final URL."));
   out.push(idx("google-index-status", "Google indexing status", "not_tested", "high",
-    "Google indexing status not verified — connect Google Search Console. A 200 status, sitemap entry or self-canonical does not prove a page is indexed.",
-    "Connect Google Search Console (Phase 2) to use the URL Inspection API for the property.",
+    "Not verified through Search Console. A 200 status, crawl permission, sitemap entry or self-canonical does not prove a page is indexed.",
+    "Connect Google Search Console in Settings and enable it for the audit to use the URL Inspection API for a verified property.",
     "Requires the Search Console URL Inspection API, subject to Google's quotas and property authorization."));
   if (p.hreflang.length) {
     const bad = p.hreflang.filter((h) => !h.href || !/^([a-z]{2,3}(-[a-z0-9]{2,4})?|x-default)$/i.test(h.lang));
@@ -258,7 +258,7 @@ export function technicalChecks(ctx: CheckContext): CheckResult[] {
   }
   if (!isHomepage(ctx.url)) {
     // Orphan detection needs a crawl graph; report honestly.
-    out.push(lnk("orphan-pages", "Orphan page detection", "not_tested", "low", "Orphan detection needs a multi-page crawl plus sitemap comparison (Phase 2).", "—", "Requires multi-page crawl."));
+    out.push(lnk("orphan-pages", "Orphan page candidates", "not_tested", "low", "Orphan detection needs a multi-page crawl plus sitemap comparison. Run a Full Site Audit to check this.", "Run a Full Site Audit.", "Requires a multi-page crawl."));
   }
   return out;
 }

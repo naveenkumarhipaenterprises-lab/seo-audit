@@ -55,7 +55,8 @@ export function contentChecks(ctx: CheckContext, kw: KeywordSummary | null): Che
     words < 300 ? "Add genuinely useful detail if the page's purpose calls for it. There is no fixed word count requirement." : "No action needed.",
     "Word count of <main>/<article> (or <body>) excluding nav, header, footer, scripts and styles.", [`${words} words`],
     "Word count is a rough proxy; quality and intent match matter more than length."));
-  out.push(b("duplicate-content", "Duplicate content across pages", "not_tested", "medium", "Comparing content between pages requires a multi-page crawl (Phase 2).", "—", "Requires multi-page crawl."));
+  out.push(...qualityChecks(ctx));
+  out.push(b("duplicate-content", "Duplicate content across pages", "not_tested", "medium", "Comparing content between pages requires a multi-page crawl. Run a Full Site Audit to check this.", "Run a Full Site Audit.", "Requires a multi-page crawl."));
   if (!kw) {
     out.push(k("keyword-provided", "Target keyword analysis", "not_tested", "medium", "No primary keyword was entered, so keyword placement was not analysed.", "Enter a primary keyword when starting an audit.", "User input."));
     return out;
@@ -89,5 +90,69 @@ export function contentChecks(ctx: CheckContext, kw: KeywordSummary | null): Che
     kwLinks.length ? `${kwLinks.length} internal link(s) use anchor text containing the keyword.` : "No internal links on this page use the keyword in their anchor text.",
     "Link related pages with descriptive anchor text where it helps readers.", "Matched internal link anchor text.",
     kwLinks.slice(0, 10).map((l) => `"${truncate(l.text, 60)}" → ${l.href}`)));
+  return out;
+}
+
+const STOP = new Set("a an and are as at be but by for from has have how i in is it its of on or our that the this to was we what when where which who why will with you your".split(" "));
+const tokens = (t: string) => norm(t).replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w));
+
+function syllables(word: string): number {
+  const w = word.toLowerCase().replace(/[^a-z]/g, "");
+  if (w.length <= 3) return 1;
+  const groups = w.replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, "").replace(/^y/, "").match(/[aeiouy]{1,2}/g);
+  return Math.max(1, groups?.length || 1);
+}
+
+/** Flesch reading ease (English only). Returns null when there is too little text to judge. */
+export function fleschReadingEase(text: string): number | null {
+  const sentences = text.split(/[.!?]+(?:\s|$)/).filter((s) => s.trim().split(/\s+/).length >= 3);
+  const words = text.split(/\s+/).filter((w) => /[a-z]/i.test(w));
+  if (words.length < 100 || sentences.length < 3) return null;
+  const syl = words.reduce((n, w) => n + syllables(w), 0);
+  return Math.round((206.835 - 1.015 * (words.length / sentences.length) - 84.6 * (syl / words.length)) * 10) / 10;
+}
+
+/** Most repeated 3-word phrases (stop words excluded), used as a keyword-stuffing indicator. */
+export function repeatedPhrases(text: string, min = 6): { phrase: string; count: number }[] {
+  const w = tokens(text);
+  const m = new Map<string, number>();
+  for (let i = 0; i + 3 <= w.length; i++) {
+    const k = w.slice(i, i + 3).join(" ");
+    m.set(k, (m.get(k) || 0) + 1);
+  }
+  return Array.from(m.entries()).filter(([, n]) => n >= min).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([phrase, count]) => ({ phrase, count }));
+}
+
+function qualityChecks(ctx: CheckContext): CheckResult[] {
+  const out: CheckResult[] = [];
+  const b = (id: string, title: string, status: CheckResult["status"], sev: CheckResult["severity"], expl: string, rec: string, det: string, ev: string[] = [], lim?: string): CheckResult =>
+    ({ ...builder("content", "Content quality", ctx.url)(id, title, status, sev, expl, rec, det, ev, lim), source: "assessment" });
+  const p = ctx.parsed.summary;
+  const h1 = p.headings.find((h) => h.level === 1)?.text || "";
+  if (p.title && h1) {
+    const brand = new Set(tokens(ctx.parsed.siteName || ""));
+    const a = new Set(tokens(p.title).filter((t) => !brand.has(t)));
+    const c = new Set(tokens(h1).filter((t) => !brand.has(t)));
+    const shared = Array.from(a).filter((t) => c.has(t));
+    const overlap = a.size && c.size ? shared.length / Math.min(a.size, c.size) : 0;
+    out.push(b("topic-title-h1", "Title and H1 describe the same topic", overlap >= 0.3 ? "pass" : "warning", "low",
+      overlap >= 0.3 ? "The title and main heading share key terms, so the page topic is consistent." : "The title and the H1 share few meaningful words, which can make the main topic less clear.",
+      overlap >= 0.3 ? "No action needed." : "Make sure the title and H1 both state the page's main topic (they need not be identical).",
+      "Overlap of non-stop-word terms between <title> and the first <h1>, excluding the site name.", [`Title: "${truncate(p.title, 90)}"`, `H1: "${truncate(h1, 90)}"`, `Shared terms: ${shared.join(", ") || "none"}`],
+      "A heuristic; synonyms are not recognised."));
+  }
+  const english = !p.lang || /^en\b/i.test(p.lang);
+  const fre = english ? fleschReadingEase(ctx.parsed.mainText) : null;
+  out.push(b("readability", "Readability", !english ? "not_applicable" : fre === null ? "not_tested" : fre >= 50 ? "pass" : fre >= 30 ? "warning" : "warning", "low",
+    !english ? `Readability scoring is only calibrated for English; the page language is "${p.lang}".` : fre === null ? "There was too little running text to estimate readability." : `Flesch reading ease is ${fre} (${fre >= 60 ? "plain English" : fre >= 50 ? "fairly difficult" : fre >= 30 ? "difficult" : "very difficult"}).`,
+    fre !== null && fre < 50 ? "Shorter sentences and plainer words make content easier to scan and quote. Technical audiences may justify harder text." : "No action needed.",
+    "Flesch reading ease over the main content (sentence length and syllables per word).", [], "A formula-based estimate; it ignores meaning, layout and audience."));
+  const reps = repeatedPhrases(ctx.parsed.mainText);
+  const words = Math.max(1, p.mainWordCount);
+  const heavy = reps.filter((r) => (r.count * 3) / words > 0.02);
+  out.push(b("repeated-phrases", "Repeated phrases", p.mainWordCount < 150 ? "not_applicable" : heavy.length ? "warning" : "pass", "low",
+    heavy.length ? "Some three-word phrases repeat unusually often, which can read as keyword stuffing." : "No phrase repeats unusually often in the main content.",
+    heavy.length ? "Vary wording and remove repetition that does not help readers." : "No action needed.",
+    "Counted repeated three-word phrases (stop words removed) in the main content.", reps.map((r) => `"${r.phrase}" × ${r.count}`), "Lists and product grids can repeat phrases legitimately."));
   return out;
 }

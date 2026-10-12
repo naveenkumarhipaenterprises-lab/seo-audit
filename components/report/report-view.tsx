@@ -1,16 +1,20 @@
 "use client";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertOctagon, AlertTriangle, ArrowDownRight, ArrowUpRight, CheckCircle2, CircleHelp, FileWarning, Globe2, Info, Minus } from "lucide-react";
-import type { AuditRecord, Category, CheckResult } from "@/lib/audit/types";
+import { AlertOctagon, AlertTriangle, CheckCircle2, CircleHelp, Globe2, Info, MinusCircle, ShieldCheck } from "lucide-react";
+import type { AuditRecord, Category } from "@/lib/audit/types";
 import { CATEGORY_LABELS } from "@/lib/audit/types";
+import type { AuditComparison } from "@/lib/audit/compare";
+import { statusLabel } from "@/lib/audit/record-utils";
+import { SCORE_NOTICE, SEO_COMPONENT_WEIGHTS, SEVERITY_WEIGHTS, OVERALL_WEIGHTS } from "@/lib/scoring/weights";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Pill, StatusBadge } from "@/components/ui/badge";
 import { ScoreRing } from "./score-ring";
 import { CheckItem, CheckList } from "./check-list";
 import { ImageTable } from "./image-table";
 import { ExportButtons } from "./export-buttons";
+import { IssueManager } from "./issues";
+import { ComparisonCard, CompetitorsTable, KV, PagesTable, RetryPerformanceButton, SearchConsolePanel } from "./report-panels";
 import { cn, formatDate, safeHref, scoreTone } from "@/lib/utils";
-import type { AuditSummary } from "@/lib/store";
 
 const TABS = [
   { key: "overview", label: "Overview" },
@@ -20,99 +24,161 @@ const TABS = [
   { key: "aeo", label: "AEO" },
   { key: "geo", label: "GEO" },
   { key: "performance", label: "Performance & Mobile" },
+  { key: "pages", label: "Pages" },
   { key: "methodology", label: "Methodology" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
+const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || "SearchScope AI";
 const SEV = { critical: 0, high: 1, medium: 2, low: 3 };
 const byCat = (r: AuditRecord, ...cats: Category[]) => r.checks.filter((c) => cats.includes(c.category));
-const fmt = (n: number | null) => (n === null ? "Not tested" : String(n));
+const fmt = (n: number | null | undefined) => (n === null || n === undefined ? "Not tested" : String(n));
 
-export function ReportView({ record: r, previous }: { record: AuditRecord; previous: AuditSummary | null }) {
+const STATUS_TONE: Record<string, string> = {
+  completed: "bg-green-50 text-green-700",
+  completed_with_warnings: "bg-amber-50 text-amber-800",
+  partial: "bg-amber-50 text-amber-800",
+};
+
+export function ReportView({ record: r, comparison, fixed }: { record: AuditRecord; comparison: AuditComparison | null; fixed: AuditRecord["checks"] | null }) {
   const params = useSearchParams();
   const router = useRouter();
-  const tab = (TABS.find((t) => t.key === params.get("tab"))?.key || "overview") as TabKey;
+  const full = r.input.mode === "full";
+  const tabs = TABS.filter((t) => t.key !== "pages" || (r.pages?.length ?? 0) > 0);
+  const tab = (tabs.find((t) => t.key === params.get("tab"))?.key || "overview") as TabKey;
   const setTab = (k: TabKey) => router.replace(`?tab=${k}`, { scroll: false });
   const s = r.scores;
   const cats = s.categories;
+  const t = s.totals;
+  const tested = t.tested ?? t.passed + t.warnings + t.errors;
+  const pagesAnalysed = r.pages?.filter((p) => !p.error).length || r.pagesCrawled;
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-brand-700">{APP_NAME}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-semibold text-slate-900 sm:text-2xl">Audit report</h1>
-            {r.status === "partial" ? <Pill className="bg-amber-50 text-amber-800">Partial report</Pill> : <Pill className="bg-green-50 text-green-700">Complete</Pill>}
+            <Pill className="bg-slate-100 text-slate-700">{full ? "Full Site Audit" : "Quick Audit"}</Pill>
+            <Pill className={STATUS_TONE[r.status] || "bg-slate-100 text-slate-700"}>{statusLabel(r.status)}</Pill>
           </div>
           <a href={safeHref(r.finalUrl)} target="_blank" rel="noopener noreferrer nofollow" className="mt-1 block break-all text-sm text-brand-700 hover:underline">{r.finalUrl}</a>
-          <p className="mt-1 text-xs text-slate-500">Completed {formatDate(r.completedAt)} · Methodology {s.methodologyVersion} · HTTP {r.httpStatus}{r.redirects.length ? ` after ${r.redirects.length} redirect(s)` : ""}</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Started {formatDate(r.createdAt)} · Completed {formatDate(r.completedAt)} · HTTP {r.httpStatus ?? "—"}{r.redirects.length ? ` after ${r.redirects.length} redirect(s)` : ""} · Methodology {s.methodologyVersion}{r.engineVersion ? ` · Engine ${r.engineVersion}` : ""}
+          </p>
         </div>
-        <ExportButtons id={r.id} />
-      </div>
+        <ExportButtons id={r.id} url={r.finalUrl} />
+      </header>
+
+      <p className="flex gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600"><Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" aria-hidden />{SCORE_NOTICE}</p>
 
       {r.status === "partial" && (
-        <div className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+        <div className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <p>Some analyses did not run or failed, so a few scores are based on fewer checks. Completed results are shown below. Details: {r.partialReasons.join(" ") || "see the Methodology tab."}</p>
+          <p>Partially completed: some analyses did not run or failed, so a few scores are based on fewer checks. Completed results are shown below. {r.partialReasons.join(" ") || "See the Methodology tab."}</p>
+        </div>
+      )}
+      {r.status !== "partial" && (r.warnings?.length ?? 0) > 0 && (
+        <div className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <div><p className="font-medium">Completed with warnings</p><ul className="mt-1 list-disc pl-5">{r.warnings!.map((w) => <li key={w}>{w}</li>)}</ul></div>
         </div>
       )}
 
       <Card>
         <CardContent className="grid grid-cols-2 gap-6 py-6 sm:grid-cols-3 lg:grid-cols-6">
-          <ScoreRing label="Overall Visibility" score={s.overall.score} sub="SEO + AEO + GEO" />
+          <ScoreRing label="Overall Health" score={s.overall.score} sub="SEO + AEO + GEO + A11y + Security" />
           <ScoreRing label="SEO Score" score={s.seo.score} />
-          <ScoreRing label="AEO Score" score={cats.aeo.score} />
-          <ScoreRing label="GEO Score" score={cats.geo.score} />
+          <ScoreRing label="AEO Readiness" score={cats.aeo.score} sub="Assessment" />
+          <ScoreRing label="GEO Readiness" score={cats.geo.score} sub="Assessment" />
           <ScoreRing label="Performance" score={cats.performance.score} sub="Lighthouse (lab)" />
           <ScoreRing label="Mobile Usability" score={cats.mobile.score} />
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <Stat label="Pages crawled" value={r.pagesCrawled} icon={<Globe2 className="h-4 w-4 text-brand-600" />} />
-        <Stat label="Errors" value={s.totals.errors} icon={<AlertOctagon className="h-4 w-4 text-red-600" />} />
-        <Stat label="Warnings" value={s.totals.warnings} icon={<AlertTriangle className="h-4 w-4 text-amber-600" />} />
-        <Stat label="Passed checks" value={s.totals.passed} icon={<CheckCircle2 className="h-4 w-4 text-green-600" />} />
-        <Stat label="Not tested" value={s.totals.notTested} icon={<CircleHelp className="h-4 w-4 text-slate-400" />} />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+        {(["technical", "onpage", "content", "images", "accessibility", "security"] as Category[]).map((c) => {
+          const tone = scoreTone(cats[c]?.score ?? null);
+          return (
+            <Card key={c} className="p-3">
+              <p className="text-xs font-medium text-slate-500">{CATEGORY_LABELS[c]}</p>
+              <p className={cn("mt-1 text-xl font-semibold", tone.text)}>{fmt(cats[c]?.score)}</p>
+            </Card>
+          );
+        })}
+        <Stat label="Pages analysed" value={pagesAnalysed} icon={<Globe2 className="h-4 w-4 text-brand-600" />} />
+        <Stat label="Checks tested" value={tested} icon={<ShieldCheck className="h-4 w-4 text-brand-600" />} />
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <Stat label="Passed" value={t.passed} icon={<CheckCircle2 className="h-4 w-4 text-green-600" />} />
+        <Stat label="Failed" value={t.errors} icon={<AlertOctagon className="h-4 w-4 text-red-600" />} />
+        <Stat label="Warnings" value={t.warnings} icon={<AlertTriangle className="h-4 w-4 text-amber-600" />} />
+        <Stat label="Skipped / not tested" value={t.notTested} icon={<CircleHelp className="h-4 w-4 text-slate-400" />} />
+        <Stat label="Not applicable" value={t.notApplicable ?? r.checks.filter((c) => c.status === "not_applicable").length} icon={<MinusCircle className="h-4 w-4 text-slate-400" />} />
       </div>
 
-      {previous && <ScoreChanges record={r} previous={previous} />}
+      {comparison && <ComparisonCard cmp={comparison} />}
 
       <div className="no-print -mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
-        <div className="flex min-w-max gap-1 border-b border-slate-200" role="tablist">
-          {TABS.map((t) => (
-            <button key={t.key} role="tab" aria-selected={tab === t.key} onClick={() => setTab(t.key)}
-              className={cn("-mb-px border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap", tab === t.key ? "border-brand-600 text-brand-700" : "border-transparent text-slate-500 hover:text-slate-800")}>
-              {t.label}
+        <div className="flex min-w-max gap-1 border-b border-slate-200" role="tablist" aria-label="Report sections">
+          {tabs.map((x) => (
+            <button key={x.key} role="tab" id={`tab-${x.key}`} aria-controls="report-panel" aria-selected={tab === x.key} onClick={() => setTab(x.key)}
+              className={cn("-mb-px border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap", tab === x.key ? "border-brand-600 text-brand-700" : "border-transparent text-slate-500 hover:text-slate-800")}>
+              {x.label}
             </button>
           ))}
         </div>
       </div>
 
-      <div role="tabpanel">
-        {tab === "overview" && <Overview r={r} />}
-        {tab === "seo" && <Section title={CATEGORY_LABELS.technical} score={cats.technical.score}><CheckList checks={byCat(r, "technical")} /></Section>}
+      <div role="tabpanel" id="report-panel" aria-labelledby={`tab-${tab}`}>
+        {tab === "overview" && <Overview r={r} fixed={fixed} />}
+        {tab === "seo" && <SeoTab r={r} />}
         {tab === "images" && (
           <div className="space-y-6">
             <Section title="Image SEO" score={cats.images.score}><CheckList checks={byCat(r, "images")} grouped={false} /></Section>
-            <Card><CardHeader><CardTitle>Image inventory ({r.images.length})</CardTitle><CardDescription>Images found in the page HTML. Links open the original file in a new tab; images are not loaded into this app.</CardDescription></CardHeader><CardContent><ImageTable images={r.images} /></CardContent></Card>
+            <Card>
+              <CardHeader><CardTitle>Image inventory ({r.images.length})</CardTitle><CardDescription>Images found in the analysed HTML{full ? " across crawled pages" : ""}. Links open the original file in a new tab.</CardDescription></CardHeader>
+              <CardContent><ImageTable images={r.images} /></CardContent>
+            </Card>
           </div>
         )}
         {tab === "content" && <ContentTab r={r} />}
         {tab === "aeo" && <AeoTab r={r} />}
         {tab === "geo" && <GeoTab r={r} />}
         {tab === "performance" && <PerformanceTab r={r} />}
+        {tab === "pages" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Page inventory ({r.pages?.length ?? 0})</CardTitle>
+              {r.crawl && r.crawl.enabled && (
+                <CardDescription>
+                  Discovered {r.crawl.discovered}, processed {r.crawl.processed}, failed {r.crawl.failed}, skipped by robots.txt {r.crawl.skippedRobots}, not crawled because of the limits {r.crawl.skippedOther}. Limits: {r.crawl.maxPages} pages, depth {r.crawl.maxDepth}. Stopped because: {STOP_REASON[r.crawl.stopReason]}.
+                </CardDescription>
+              )}
+            </CardHeader>
+            <CardContent><PagesTable pages={r.pages || []} /></CardContent>
+          </Card>
+        )}
         {tab === "methodology" && <MethodologyTab r={r} />}
       </div>
     </div>
   );
 }
 
+const STOP_REASON: Record<string, string> = {
+  complete: "every discoverable page within the limits was processed",
+  page_limit: "the maximum page limit was reached",
+  time_budget: "the crawl time budget was reached",
+  cancelled: "the audit was cancelled",
+  not_run: "the crawl did not run",
+};
+
 function Stat({ label, value, icon }: { label: string; value: number; icon: React.ReactNode }) {
   return (
-    <Card className="p-4">
+    <Card className="p-3">
       <div className="flex items-center gap-2 text-xs font-medium text-slate-500">{icon}{label}</div>
-      <p className="mt-1 text-2xl font-semibold text-slate-900">{value}</p>
+      <p className="mt-1 text-xl font-semibold text-slate-900">{value}</p>
     </Card>
   );
 }
@@ -130,83 +196,36 @@ function Section({ title, score, children, description }: { title: string; score
   );
 }
 
-function ScoreChanges({ record: r, previous: p }: { record: AuditRecord; previous: AuditSummary }) {
-  const rows: [string, number | null, number | null][] = [
-    ["Overall", r.scores.overall.score, p.overall], ["SEO", r.scores.seo.score, p.seo], ["AEO", r.scores.categories.aeo.score, p.aeo], ["GEO", r.scores.categories.geo.score, p.geo], ["Performance", r.scores.categories.performance.score, p.performance],
-  ];
-  return (
-    <Card>
-      <CardHeader><CardTitle>Score changes</CardTitle><CardDescription>Compared with the previous audit of this URL on {formatDate(p.createdAt)}.</CardDescription></CardHeader>
-      <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-        {rows.map(([label, now, before]) => {
-          const d = now !== null && before !== null ? now - before : null;
-          return (
-            <div key={label} className="rounded-lg border border-slate-100 p-3">
-              <p className="text-xs text-slate-500">{label}</p>
-              <p className="flex items-center gap-1 text-lg font-semibold">
-                {fmt(now)}
-                {d !== null && d !== 0 && <span className={cn("flex items-center text-sm", d > 0 ? "text-green-700" : "text-red-700")}>{d > 0 ? <ArrowUpRight className="h-4 w-4" /> : <ArrowDownRight className="h-4 w-4" />}{Math.abs(d)}</span>}
-                {d === 0 && <Minus className="h-4 w-4 text-slate-400" aria-label="no change" />}
-              </p>
-              <p className="text-xs text-slate-400">was {fmt(before)}</p>
-            </div>
-          );
-        })}
-      </CardContent>
-    </Card>
-  );
-}
-
-function IssueList({ title, items, icon, empty }: { title: string; items: CheckResult[]; icon: React.ReactNode; empty: string }) {
-  return (
-    <Card>
-      <CardHeader><CardTitle className="flex items-center gap-2">{icon}{title} <span className="text-sm font-normal text-slate-400">({items.length})</span></CardTitle></CardHeader>
-      <CardContent className="space-y-2">
-        {items.length === 0 ? <p className="text-sm text-slate-500">{empty}</p> : items.slice(0, 8).map((c) => <CheckItem key={c.id} c={c} />)}
-        {items.length > 8 && <p className="text-xs text-slate-500">+{items.length - 8} more in the category tabs.</p>}
-      </CardContent>
-    </Card>
-  );
-}
-
-function KV({ rows }: { rows: [string, React.ReactNode][] }) {
-  return (
-    <dl className="divide-y divide-slate-100 text-sm">
-      {rows.map(([k, v]) => (
-        <div key={k} className="grid grid-cols-3 gap-3 py-2"><dt className="text-slate-500">{k}</dt><dd className="col-span-2 break-words text-slate-800">{v}</dd></div>
-      ))}
-    </dl>
-  );
-}
-
-function Overview({ r }: { r: AuditRecord }) {
-  const issues = r.checks.filter((c) => c.status === "fail" || c.status === "warning").sort((a, b) => SEV[a.severity] - SEV[b.severity]);
-  const critical = issues.filter((c) => c.status === "fail" && c.severity === "critical");
-  const high = issues.filter((c) => c.status === "fail" && c.severity === "high");
-  const warnings = issues.filter((c) => c.status === "warning");
-  const passed = r.checks.filter((c) => c.status === "pass");
+function Overview({ r, fixed }: { r: AuditRecord; fixed: AuditRecord["checks"] | null }) {
   const p = r.page;
   const missingAlt = r.images.filter((i) => i.altState === "missing").length;
   const brokenImg = r.images.filter((i) => i.probe && ((i.probe.error && !i.probe.unverified) || (i.probe.status ?? 0) >= 400)).length;
   const idx = (id: string) => r.checks.find((c) => c.id === id);
+  const aeoGeo = [...byCat(r, "aeo"), ...byCat(r, "geo")].filter((c) => c.status === "warning" || c.status === "fail").sort((a, b) => SEV[a.severity] - SEV[b.severity]);
+  const gscIndex = r.searchConsole?.status === "ok" && r.searchConsole.inspection && !r.searchConsole.inspection.error ? r.searchConsole.inspection : null;
   return (
     <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Prioritised issues</CardTitle>
+          <CardDescription>Ordered by severity, then failures before warnings, then the number of affected pages. Set an issue to Ignored or Not applicable to track your review; scores are not changed.</CardDescription>
+        </CardHeader>
+        <CardContent><IssueManager auditId={r.id} checks={r.checks} fixed={fixed} initialStates={r.issueStates || {}} /></CardContent>
+      </Card>
+
+      <CompetitorsTable site={r.siteSnapshot} competitors={r.competitors || []} />
+
       <div className="grid gap-6 lg:grid-cols-2">
-        <IssueList title="Critical issues" items={critical} icon={<AlertOctagon className="h-4 w-4 text-red-600" />} empty="No critical issues found." />
-        <IssueList title="High-priority issues" items={high} icon={<FileWarning className="h-4 w-4 text-red-500" />} empty="No high-priority failures found." />
-        <IssueList title="Warnings" items={warnings} icon={<AlertTriangle className="h-4 w-4 text-amber-600" />} empty="No warnings." />
         <Card>
-          <CardHeader><CardTitle className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-green-600" />Passed checks <span className="text-sm font-normal text-slate-400">({passed.length})</span></CardTitle></CardHeader>
-          <CardContent><ul className="grid gap-1 text-sm text-slate-700 sm:grid-cols-2">{passed.map((c) => <li key={c.id} className="flex items-center gap-2"><CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-green-600" />{c.title}</li>)}</ul></CardContent>
-        </Card>
-      </div>
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader><CardTitle>Indexing information</CardTitle></CardHeader>
+          <CardHeader><CardTitle>Indexing signals</CardTitle></CardHeader>
           <CardContent>
-            <p className="mb-3 flex gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900"><Info className="mt-0.5 h-4 w-4 shrink-0" />Google indexing status not verified — connect Google Search Console.</p>
+            {gscIndex ? (
+              <p className="mb-3 rounded-md bg-green-50 px-3 py-2 text-sm text-green-800">Google URL Inspection: {gscIndex.verdict || "—"}{gscIndex.coverageState ? ` · ${gscIndex.coverageState}` : ""}</p>
+            ) : (
+              <p className="mb-3 flex gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900"><Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />Not verified through Search Console. The signals below are what the page itself declares.</p>
+            )}
             <KV rows={[
-              ["HTTP status", `${r.httpStatus}`],
+              ["HTTP status", `${r.httpStatus ?? "—"}`],
               ["robots.txt", idx("robots-allows-page")?.status === "fail" ? "Disallows Googlebot" : r.robots.status === "ok" ? "Allows Googlebot" : r.robots.status],
               ["Robots directives", p?.robotsMeta.join("; ") || p?.xRobotsTag || "None"],
               ["Canonical", p?.canonical || "Not set"],
@@ -215,7 +234,7 @@ function Overview({ r }: { r: AuditRecord }) {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>Metadata summary</CardTitle></CardHeader>
+          <CardHeader><CardTitle>Metadata summary (start page)</CardTitle></CardHeader>
           <CardContent>
             <KV rows={[
               ["Title", p?.title ? <>{p.title} <span className="text-xs text-slate-400">({p.title.length} chars)</span></> : <span className="text-red-700">Missing</span>],
@@ -233,12 +252,14 @@ function Overview({ r }: { r: AuditRecord }) {
         <Card>
           <CardHeader><CardTitle>Mobile and desktop performance</CardTitle></CardHeader>
           <CardContent>
-            <KV rows={r.performance.map((perf) => [perf.strategy === "mobile" ? "Mobile" : "Desktop", perf.status === "ok" ? <>{perf.score}/100 · LCP {perf.lab.LCP?.display ?? "n/a"} · CLS {perf.lab.CLS?.display ?? "n/a"} · TBT {perf.lab.TBT?.display ?? "n/a"}</> : <span className="text-slate-500">Not tested: {perf.error}</span>])} />
+            {r.performance.length === 0 ? <p className="text-sm text-slate-500">Performance was not tested for this audit.</p> : (
+              <KV rows={r.performance.map((perf) => [perf.strategy === "mobile" ? "Mobile" : "Desktop", perf.status === "ok" ? <>{perf.score}/100 · LCP {perf.lab.LCP?.display ?? "n/a"} · CLS {perf.lab.CLS?.display ?? "n/a"} · TBT {perf.lab.TBT?.display ?? "n/a"}</> : <span className="text-slate-500">Not tested: {perf.error}</span>])} />
+            )}
             <p className="mt-2 text-xs text-slate-500">Lab data from Lighthouse via PageSpeed Insights. Field data is on the Performance tab.</p>
           </CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>Keyword analysis</CardTitle></CardHeader>
+          <CardHeader><CardTitle>On-page keyword analysis</CardTitle></CardHeader>
           <CardContent>
             {r.keyword ? (
               <>
@@ -250,15 +271,54 @@ function Overview({ r }: { r: AuditRecord }) {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>AEO and GEO recommendations</CardTitle></CardHeader>
+          <CardHeader><CardTitle>AEO and GEO recommendations</CardTitle><CardDescription>Assessments based on page signals, not measured AI visibility.</CardDescription></CardHeader>
           <CardContent className="space-y-2 text-sm">
-            {[...byCat(r, "aeo"), ...byCat(r, "geo")].filter((c) => c.status === "warning" || c.status === "fail").sort((a, b) => SEV[a.severity] - SEV[b.severity]).slice(0, 6).map((c) => (
+            {aeoGeo.slice(0, 6).map((c) => (
               <p key={c.id} className="flex gap-2"><StatusBadge status={c.status} /><span><span className="font-medium">{c.title}:</span> {c.recommendation}</span></p>
             ))}
-            {[...byCat(r, "aeo"), ...byCat(r, "geo")].every((c) => c.status !== "warning" && c.status !== "fail") && <p className="text-slate-500">No AEO or GEO issues found.</p>}
+            {aeoGeo.length === 0 && <p className="text-slate-500">No AEO or GEO issues found.</p>}
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function SeoTab({ r }: { r: AuditRecord }) {
+  const cats = r.scores.categories;
+  const sec = r.security;
+  return (
+    <div className="space-y-6">
+      {r.crawl?.enabled && (
+        <Card>
+          <CardHeader><CardTitle>Crawl summary</CardTitle><CardDescription>Same-site pages discovered from links and sitemaps, within the limits you set.</CardDescription></CardHeader>
+          <CardContent>
+            <KV rows={[
+              ["Pages discovered", r.crawl.discovered], ["Pages processed", r.crawl.processed], ["Failed", r.crawl.failed],
+              ["Skipped by robots.txt", r.crawl.skippedRobots], ["Not crawled (limits reached)", r.crawl.skippedOther], ["Sitemap URLs used as seeds", r.crawl.sitemapUrlsUsed],
+              ["Limits", `${r.crawl.maxPages} pages, depth ${r.crawl.maxDepth}`], ["Stopped because", STOP_REASON[r.crawl.stopReason]],
+              ["Duration", `${Math.round(r.crawl.durationMs / 1000)} s`],
+            ]} />
+          </CardContent>
+        </Card>
+      )}
+      <Section title={CATEGORY_LABELS.technical} score={cats.technical.score}><CheckList checks={byCat(r, "technical")} /></Section>
+      <Section title={CATEGORY_LABELS.onpage} score={cats.onpage?.score ?? null}><CheckList checks={byCat(r, "onpage")} /></Section>
+      <SearchConsolePanel gsc={r.searchConsole} />
+      <Section title={CATEGORY_LABELS.accessibility} score={cats.accessibility?.score ?? null} description="Automated HTML checks only. They cannot confirm full WCAG conformance; manual testing is still needed.">
+        <CheckList checks={byCat(r, "accessibility")} grouped={false} />
+      </Section>
+      <Section title={CATEGORY_LABELS.security} score={cats.security?.score ?? null} description="Response headers and redirects observed for the start page. This is not a penetration test.">
+        {sec && (
+          <div className="mb-4">
+            <KV rows={[
+              ["HTTP → HTTPS", sec.httpRedirectsToHttps === null ? (sec.httpRefused ? "Plain HTTP is not served" : `Not determined${sec.httpCheckError ? `: ${sec.httpCheckError}` : ""}`) : sec.httpRedirectsToHttps ? "Redirects to HTTPS" : "Does not redirect"],
+              ...Object.entries(sec.headers).map(([k, v]) => [k, v ? <span key={k} className="font-mono text-xs">{v.length > 160 ? v.slice(0, 159) + "…" : v}</span> : <span key={k} className="text-slate-400">Not set</span>] as [string, React.ReactNode]),
+            ]} />
+          </div>
+        )}
+        <CheckList checks={byCat(r, "security")} grouped={false} />
+      </Section>
     </div>
   );
 }
@@ -268,7 +328,7 @@ function ContentTab({ r }: { r: AuditRecord }) {
     <div className="space-y-6">
       {r.keyword && (
         <Card>
-          <CardHeader><CardTitle>Keyword placement: “{r.keyword.primary}”</CardTitle><CardDescription>Whole-phrase, case-insensitive matching. Density ~{r.keyword.density}% (shown for awareness; there is no ideal value).</CardDescription></CardHeader>
+          <CardHeader><CardTitle>On-page keyword analysis: “{r.keyword.primary}”</CardTitle><CardDescription>Whole-phrase, case-insensitive matching on the start page. Density ~{r.keyword.density}% (shown for awareness; there is no ideal value). No search volume or ranking data is used.</CardDescription></CardHeader>
           <CardContent>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               {r.keyword.placements.map((p) => (
@@ -283,7 +343,7 @@ function ContentTab({ r }: { r: AuditRecord }) {
                 <tbody className="divide-y divide-slate-100">{r.keyword.secondaryResults.map((s) => <tr key={s.keyword}><td className="py-1.5">{s.keyword}</td><td>{s.inBody ? "Yes" : "No"}</td><td>{s.inHeadings ? "Yes" : "No"}</td><td>{s.occurrences}</td></tr>)}</tbody></table>
             )}
             <div className="mt-4 grid gap-2 sm:grid-cols-4">
-              {r.keyword.unavailable.map((u) => <div key={u} className="rounded-lg border border-dashed border-slate-300 p-3 text-xs text-slate-500"><span className="block font-medium text-slate-700">{u}</span>Unavailable — connect a keyword data provider</div>)}
+              {r.keyword.unavailable.map((u) => <div key={u} className="rounded-lg border border-dashed border-slate-300 p-3 text-xs text-slate-500"><span className="block font-medium text-slate-700">{u}</span>Unavailable. Connect a keyword data provider.</div>)}
             </div>
           </CardContent>
         </Card>
@@ -297,7 +357,7 @@ function AeoTab({ r }: { r: AuditRecord }) {
   const sg = r.suggestions;
   return (
     <div className="space-y-6">
-      <Section title="AEO readiness" score={r.scores.categories.aeo.score} description="How clearly the page answers likely questions. This does not indicate whether the page is shown in any answer engine.">
+      <Section title="AEO Readiness Assessment" score={r.scores.categories.aeo.score} description="How clearly the page answers likely questions, based on its structure and content. This does not show whether any answer engine uses the page.">
         <CheckList checks={byCat(r, "aeo")} />
       </Section>
       <Card>
@@ -319,9 +379,9 @@ function GeoTab({ r }: { r: AuditRecord }) {
     <div className="space-y-6">
       <div className="flex gap-2 rounded-lg border border-brand-100 bg-brand-50 p-3 text-sm text-brand-900">
         <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-        <p>A technical crawl cannot show whether ChatGPT, Gemini, Perplexity or other AI systems mention or cite this brand. No AI visibility percentages or citation counts are estimated.</p>
+        <p>This is an assessment of signals that help AI systems understand and cite a site. A technical crawl cannot show whether ChatGPT, Gemini, Perplexity or other AI systems actually mention or cite this brand, so no AI visibility percentages or citation counts are shown.</p>
       </div>
-      <Section title="GEO readiness" score={r.scores.categories.geo.score}><CheckList checks={byCat(r, "geo")} /></Section>
+      <Section title="GEO Readiness Assessment" score={r.scores.categories.geo.score}><CheckList checks={byCat(r, "geo")} /></Section>
       <Card>
         <CardHeader><CardTitle>Crawler access per robots.txt</CardTitle><CardDescription>Rules for each documented crawler token as applied to this URL. Firewall/CDN rules are not visible to this check, and operators differ in how they honour robots.txt.</CardDescription></CardHeader>
         <CardContent className="overflow-x-auto">
@@ -343,19 +403,31 @@ function GeoTab({ r }: { r: AuditRecord }) {
 }
 
 function PerformanceTab({ r }: { r: AuditRecord }) {
+  const catRow = (label: string, v: number | null | undefined) => [label, fmt(v ?? null)] as [string, React.ReactNode];
   return (
     <div className="space-y-6">
+      <RetryPerformanceButton r={r} />
+      {r.performance.length === 0 && <p className="text-sm text-slate-500">Performance was not tested for this audit (turned off when the audit was started).</p>}
       <div className="grid gap-6 lg:grid-cols-2">
         {r.performance.map((p) => (
           <Card key={p.strategy}>
             <CardHeader className="flex-row items-center justify-between"><CardTitle>{p.strategy === "mobile" ? "Mobile" : "Desktop"} performance</CardTitle><span className={cn("rounded-lg px-3 py-1 text-sm font-semibold", scoreTone(p.score).bg, scoreTone(p.score).text)}>{p.status === "ok" ? `${p.score}/100` : "Not tested"}</span></CardHeader>
             <CardContent>
-              {p.status !== "ok" ? <p className="text-sm text-slate-500">{p.error}</p> : (
+              {p.status !== "ok" ? (
+                <p className="text-sm text-slate-500">{p.error}{p.quota && " Add a free PAGESPEED_API_KEY on the server or retry later."}</p>
+              ) : (
                 <>
-                  <p className="mb-1 text-xs font-semibold uppercase text-slate-500">Lab data (Lighthouse {p.lighthouseVersion})</p>
+                  <p className="mb-1 text-xs text-slate-500">Tested {p.fetchedAt ? formatDate(p.fetchedAt) : "—"}{p.cached ? " (cached result)" : ""}</p>
+                  {p.categories && (
+                    <>
+                      <p className="mt-2 mb-1 text-xs font-semibold uppercase text-slate-500">Lighthouse categories</p>
+                      <KV rows={[catRow("Performance", p.categories.performance), catRow("Accessibility", p.categories.accessibility), catRow("Best Practices", p.categories.bestPractices), catRow("SEO", p.categories.seo)]} />
+                    </>
+                  )}
+                  <p className="mt-4 mb-1 text-xs font-semibold uppercase text-slate-500">Lab data (Lighthouse {p.lighthouseVersion})</p>
                   <KV rows={Object.entries(p.lab).map(([k, v]) => [k, v.display ?? "Unavailable"])} />
                   <p className="mt-4 mb-1 text-xs font-semibold uppercase text-slate-500">Field data (Chrome UX Report, p75)</p>
-                  {p.field.source === "none" ? <p className="text-sm text-slate-500">Unavailable: not enough real-user data for this URL or origin. INP is not shown.</p> : (
+                  {p.field.source === "none" ? <p className="text-sm text-slate-500">No field data available: there is not enough real-user data for this URL or origin. INP is only available as field data and is not estimated from lab metrics.</p> : (
                     <>
                       <p className="mb-1 text-xs text-slate-500">{p.field.source === "origin" ? "Origin-level data (whole site), not this URL." : "URL-level data."} Overall: {p.field.overall ?? "n/a"}</p>
                       <KV rows={Object.entries(p.field.metrics).map(([k, m]) => [k, `${m.p75 ?? "n/a"}${k === "CLS" ? "" : " ms"} · ${m.category ?? "n/a"}`])} />
@@ -390,29 +462,57 @@ function PerformanceTab({ r }: { r: AuditRecord }) {
 
 function MethodologyTab({ r }: { r: AuditRecord }) {
   const s = r.scores;
+  const sw = SEVERITY_WEIGHTS;
+  const seoW = Object.entries(SEO_COMPONENT_WEIGHTS).map(([k, v]) => `${CATEGORY_LABELS[k as Category]} ${v}%`).join(", ");
+  const ovW = Object.entries(OVERALL_WEIGHTS).map(([k, v]) => `${k} ${v}%`).join(", ");
+  const tasks = r.tasks || [];
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader><CardTitle>How the scores are calculated</CardTitle><CardDescription>Version {s.methodologyVersion}. This is SearchScope&apos;s diagnostic model, not an official Google, ChatGPT or other search engine score.</CardDescription></CardHeader>
+        <CardHeader><CardTitle>How the scores are calculated</CardTitle><CardDescription>Methodology version {s.methodologyVersion}. This is {APP_NAME}&apos;s diagnostic model, not an official Google, ChatGPT or other search engine score.</CardDescription></CardHeader>
         <CardContent className="space-y-4 text-sm">
           <p className="rounded-md bg-slate-50 p-3 font-mono text-xs text-slate-700">{s.overall.formula}</p>
-          <p>Each check is worth points by severity (critical 10, high 6, medium 3, low 1). Pass earns full points, warning half, fail none. Not applicable, informational and not-tested checks are excluded. Every check belongs to exactly one category, so the same issue is not penalised twice. Performance uses the Lighthouse score directly.</p>
+          <p>Each check is worth points by severity (critical {sw.critical}, high {sw.high}, medium {sw.medium}, low {sw.low}). A pass earns full points, a warning half and a failure none. Not applicable, informational and skipped checks are excluded, so missing data never counts as a pass or a failure. Every check belongs to exactly one category, so the same issue is not penalised twice. Performance uses the Lighthouse score directly.</p>
+          <p>SEO score: {seoW}. Overall health: {ovW}. Weights are renormalised over the parts that were actually tested.</p>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[520px] text-left"><thead className="text-xs uppercase text-slate-500"><tr><th className="py-2">Overall component</th><th>Score</th><th>Weight</th><th>Effective</th><th>Contribution</th></tr></thead>
               <tbody className="divide-y divide-slate-100">{s.overall.components.map((c) => <tr key={c.name}><td className="py-2">{c.name}</td><td>{fmt(c.score)}</td><td>{c.weight}%</td><td>{c.effectiveWeight}%</td><td>{c.contribution ?? "—"}</td></tr>)}
                 <tr className="font-semibold"><td className="py-2">Overall</td><td>{fmt(s.overall.score)}</td><td /><td /><td /></tr></tbody></table>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[520px] text-left"><thead className="text-xs uppercase text-slate-500"><tr><th className="py-2">Category</th><th>Score</th><th>Points</th><th>Pass</th><th>Warn</th><th>Fail</th><th>Not tested</th></tr></thead>
-              <tbody className="divide-y divide-slate-100">{Object.values(s.categories).map((c) => <tr key={c.category}><td className="py-2">{c.label}</td><td>{fmt(c.score)}</td><td>{c.category === "performance" ? "Lighthouse" : `${c.earned}/${c.possible}`}</td><td>{c.counts.pass}</td><td>{c.counts.warning}</td><td>{c.counts.fail}</td><td>{c.counts.not_tested}</td></tr>)}</tbody></table>
+            <table className="w-full min-w-[520px] text-left"><thead className="text-xs uppercase text-slate-500"><tr><th className="py-2">Category</th><th>Score</th><th>Points</th><th>Pass</th><th>Warn</th><th>Fail</th><th>Not tested</th><th>N/A</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">{Object.values(s.categories).map((c) => <tr key={c.category}><td className="py-2">{c.label}</td><td>{fmt(c.score)}</td><td>{c.category === "performance" ? "Lighthouse" : `${c.earned}/${c.possible}`}</td><td>{c.counts.pass}</td><td>{c.counts.warning}</td><td>{c.counts.fail}</td><td>{c.counts.not_tested}</td><td>{c.counts.not_applicable ?? 0}</td></tr>)}</tbody></table>
           </div>
+          <p className="text-xs text-slate-500">Each finding is labelled with its source: <strong>Observed</strong> (measured directly from fetched pages or headers), <strong>External</strong> (returned by a Google API) or <strong>Assessment</strong> (this tool&apos;s judgement from page signals).</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Audit configuration and run details</CardTitle></CardHeader>
+        <CardContent className="space-y-4 text-sm">
+          <KV rows={[
+            ["Mode", r.input.mode === "full" ? `Full Site Audit (max ${r.input.maxPages} pages, depth ${r.input.maxDepth})` : "Quick Audit (single page)"],
+            ["Primary keyword", r.input.primaryKeyword || "None"],
+            ["Secondary keywords", (r.input.secondaryKeywords ?? []).join(", ") || "None"],
+            ["Competitors", (r.input.competitorUrls ?? []).join(", ") || "None"],
+            ["Business", [r.input.businessName, r.input.businessLocation, r.input.businessType].filter(Boolean).join(" · ") || "Not provided"],
+            ["Performance", r.input.runPerformance ? `PageSpeed Insights (${r.input.performanceStrategy})` : "Off"],
+            ["Rendering", r.input.renderJs ? "Headless Chromium requested" : "Off"],
+            ["robots.txt", r.input.respectRobots ? "Respected" : "Not respected (owner override)"],
+            ["Search Console", r.input.useSearchConsole ? "Requested" : "Not used"],
+          ]} />
+          {tasks.length > 0 && (
+            <div>
+              <p className="mb-1 text-xs font-semibold uppercase text-slate-500">External tasks</p>
+              <ul className="space-y-1">{tasks.map((x) => <li key={x.id}><span className="font-medium">{x.label}</span>: {x.status}{x.detail ? ` · ${x.detail}` : ""}</li>)}</ul>
+            </div>
+          )}
         </CardContent>
       </Card>
       <Card>
         <CardHeader><CardTitle>Limitations and unavailable data</CardTitle></CardHeader>
         <CardContent className="space-y-3 text-sm">
           <ul className="list-disc space-y-1 pl-5">{r.limitations.map((l) => <li key={l}>{l}</li>)}</ul>
-          <KV rows={[["PageSpeed Insights", r.integrations.pagespeed], ["Google Search Console", r.integrations.searchConsole], ["Browser rendering", r.integrations.rendering], ["AI provider", r.integrations.ai], ["Keyword data", r.integrations.keywordData]]} />
+          <KV rows={[["PageSpeed Insights", r.integrations.pagespeed], ["Google Search Console", r.integrations.searchConsole], ["Browser rendering", r.integrations.rendering], ["AI provider", r.integrations.ai], ["Keyword data", r.integrations.keywordData], ...(r.integrations.aiVisibility ? [["AI visibility", r.integrations.aiVisibility] as [string, string]] : [])]} />
         </CardContent>
       </Card>
     </div>

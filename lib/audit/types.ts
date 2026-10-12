@@ -1,16 +1,35 @@
 export type CheckStatus = "pass" | "warning" | "fail" | "info" | "not_applicable" | "not_tested";
 export type Severity = "critical" | "high" | "medium" | "low";
-export type Category = "technical" | "content" | "images" | "aeo" | "geo" | "performance" | "mobile";
+export type Category = "technical" | "onpage" | "content" | "images" | "aeo" | "geo" | "performance" | "mobile" | "accessibility" | "security";
 
 export const CATEGORY_LABELS: Record<Category, string> = {
-  technical: "Technical & On-Page SEO",
-  content: "Keyword & Content",
+  technical: "Technical SEO",
+  onpage: "On-Page SEO",
+  content: "Keywords & Content",
   images: "Image SEO",
   aeo: "AEO Readiness",
   geo: "GEO Readiness",
   performance: "Performance",
   mobile: "Mobile Usability",
+  accessibility: "Accessibility & HTML",
+  security: "Security Headers",
 };
+
+/**
+ * Where a finding comes from:
+ * - observed: directly measured from what the site returned (HTTP, HTML, headers, robots.txt, sitemaps).
+ * - external: a metric retrieved from a third-party API (PageSpeed Insights, Search Console).
+ * - assessment: this application's own judgement built on observed data (AEO/GEO readiness, readability, alt quality).
+ */
+export type FindingSource = "observed" | "external" | "assessment";
+export const SOURCE_LABELS: Record<FindingSource, string> = {
+  observed: "Observed",
+  external: "External data",
+  assessment: "Tool assessment",
+};
+
+export type AuditMode = "quick" | "full";
+export type IssueState = "open" | "ignored" | "not_applicable";
 
 export interface CheckResult {
   id: string;
@@ -28,51 +47,101 @@ export interface CheckResult {
   limitation?: string;
   /** Measured 0-100 score (only for Lighthouse performance checks). */
   measuredScore?: number;
+  /** Provenance of the finding. Older stored audits may lack it; see sourceOf(). */
+  source?: FindingSource;
+  /** Every URL the finding applies to (site-level checks in Full Site mode). */
+  affectedUrls?: string[];
+  /** ISO time the check was evaluated. */
+  detectedAt?: string;
 }
 
 export interface AuditInput {
   url: string;
+  mode: AuditMode;
+  /** Full Site mode: maximum HTML pages fetched, including the start page. */
+  maxPages: number;
+  /** Full Site mode: maximum link depth from the start page (0 = start page only). */
+  maxDepth: number;
   primaryKeyword?: string;
   secondaryKeywords?: string[];
   competitorUrls?: string[];
+  businessName?: string;
+  businessLocation?: string;
+  businessType?: string;
   respectRobots: boolean;
   renderJs: boolean;
   runPerformance: boolean;
-  enableAi: boolean;
+  performanceStrategy: "mobile" | "desktop" | "both";
+  useSearchConsole: boolean;
+  /** Kept for compatibility with stored MVP audits; no AI provider is integrated. */
+  enableAi?: boolean;
   linksToCheck: number;
   checkExternalLinks: boolean;
 }
 
-export type StageStatus = "pending" | "running" | "done" | "skipped" | "failed";
+/** "pending"/"done" appear only in audits stored by the MVP; use normalizeStageStatus(). */
+export type StageStatus = "queued" | "running" | "completed" | "skipped" | "failed";
 
 export interface StageState {
   id: StageId;
   label: string;
   status: StageStatus;
   detail?: string;
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 export const STAGES = [
-  { id: "validate", label: "Validating website URL" },
-  { id: "fetch", label: "Fetching website HTML" },
-  { id: "discover", label: "Discovering internal pages" },
-  { id: "metadata", label: "Analysing metadata and headings" },
-  { id: "indexability", label: "Checking canonical tags and indexability" },
-  { id: "assets", label: "Scanning images and links" },
-  { id: "mobile", label: "Testing mobile responsiveness" },
-  { id: "performance", label: "Measuring website performance" },
-  { id: "seo", label: "Analysing SEO signals" },
-  { id: "aeo", label: "Analysing AEO readiness" },
-  { id: "geo", label: "Analysing GEO readiness" },
-  { id: "scoring", label: "Calculating scores" },
-  { id: "report", label: "Generating the final report" },
+  { id: "validate", label: "Validating URL", modes: ["quick", "full"] },
+  { id: "connect", label: "Connecting to website", modes: ["quick", "full"] },
+  { id: "fetch", label: "Fetching HTML", modes: ["quick", "full"] },
+  { id: "discover", label: "Discovering sitemap and robots.txt", modes: ["quick", "full"] },
+  { id: "crawl", label: "Crawling internal pages", modes: ["full"] },
+  { id: "technical", label: "Analyzing technical SEO", modes: ["quick", "full"] },
+  { id: "content", label: "Checking metadata and content", modes: ["quick", "full"] },
+  { id: "assets", label: "Analyzing images and internal links", modes: ["quick", "full"] },
+  { id: "structured", label: "Validating structured data", modes: ["quick", "full"] },
+  { id: "aeo", label: "Evaluating AEO", modes: ["quick", "full"] },
+  { id: "geo", label: "Evaluating GEO", modes: ["quick", "full"] },
+  { id: "performance", label: "Running performance analysis", modes: ["quick", "full"] },
+  { id: "scoring", label: "Calculating scores", modes: ["quick", "full"] },
+  { id: "report", label: "Preparing the report", modes: ["quick", "full"] },
 ] as const;
 export type StageId = (typeof STAGES)[number]["id"];
+export const stagesForMode = (mode: AuditMode) => STAGES.filter((s) => (s.modes as readonly string[]).includes(mode));
+
+/** Sub-tasks that run inside a stage and can be slow (shown so users see which external check is still running). */
+export interface TaskState {
+  id: string;
+  stage: StageId;
+  label: string;
+  status: StageStatus;
+  detail?: string;
+}
+
+export interface CrawlProgress {
+  discovered: number;
+  processed: number;
+  failed: number;
+  limit: number;
+}
 
 export type AuditEvent =
   | { type: "stage"; stage: StageId; status: StageStatus; detail?: string }
-  | { type: "done"; auditId: string; partial: boolean }
+  | { type: "task"; task: TaskState }
+  | { type: "pages"; pages: CrawlProgress }
+  | { type: "done"; auditId: string; status: AuditRecordStatus }
   | { type: "error"; message: string; stage?: StageId };
+
+export type AuditRecordStatus = "completed" | "completed_with_warnings" | "partial";
+export type AuditFinalStatus = AuditRecordStatus | "failed" | "cancelled";
+export const FINAL_STATUS_LABELS: Record<AuditFinalStatus, string> = {
+  completed: "Completed",
+  completed_with_warnings: "Completed with warnings",
+  partial: "Partially completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
 
 export interface ImageRecord {
   src: string;
@@ -114,9 +183,15 @@ export interface PerformanceResult {
   strategy: "mobile" | "desktop";
   status: "ok" | "error" | "not_tested";
   error?: string;
+  /** True when the error was a quota/rate limit (retry later or add an API key). */
+  quota?: boolean;
   fetchedAt?: string;
+  /** Set when this result was served from the short-lived in-memory cache. */
+  cached?: boolean;
   lighthouseVersion?: string;
   score: number | null;
+  /** Lighthouse category scores (0-100) exactly as returned; missing categories are null. */
+  categories?: { performance: number | null; accessibility: number | null; bestPractices: number | null; seo: number | null };
   lab: Record<string, { value: number | null; display: string | null; score: number | null }>;
   field: {
     source: "url" | "origin" | "none";
@@ -163,17 +238,22 @@ export interface Scores {
   overall: {
     score: number | null;
     formula: string;
-    components: { name: "SEO" | "AEO" | "GEO"; weight: number; effectiveWeight: number; score: number | null; contribution: number | null }[];
+    components: { name: "SEO" | "AEO" | "GEO" | "Accessibility" | "Security"; weight: number; effectiveWeight: number; score: number | null; contribution: number | null }[];
     partial: boolean;
   };
-  totals: { errors: number; warnings: number; passed: number; notTested: number; critical: number; high: number };
+  /** tested = pass + warning + fail. notApplicable/info are present on v2 audits only. */
+  totals: { tested?: number; notApplicable?: number; info?: number; errors: number; warnings: number; passed: number; notTested: number; critical: number; high: number };
 }
 
 export interface AuditRecord {
   id: string;
+  /** Audit engine / record schema version. */
+  engineVersion?: string;
   createdAt: string;
   completedAt: string;
-  status: "complete" | "partial" | "failed";
+  status: AuditRecordStatus;
+  /** Opaque owner id (hash of the browser's owner cookie). Absent on MVP-era audits. */
+  ownerId?: string;
   input: AuditInput;
   requestedUrl: string;
   finalUrl: string;
@@ -184,6 +264,19 @@ export interface AuditRecord {
   htmlTruncated: boolean;
   pagesCrawled: number;
   stages: StageState[];
+  tasks?: TaskState[];
+  /** Full Site mode crawl summary and page inventory (start page only in Quick mode). */
+  crawl?: CrawlSummary;
+  pages?: PageInventoryItem[];
+  security?: SecuritySummary;
+  competitors?: CompetitorSnapshot[];
+  /** The audited page scored with the same reduced method as competitors, for a like-for-like comparison. */
+  siteSnapshot?: CompetitorSnapshot;
+  searchConsole?: SearchConsoleResult;
+  /** User-set state per check id (Open is the default). Does not change scores. */
+  issueStates?: Record<string, IssueState>;
+  /** Non-fatal problems that make the status "completed with warnings". */
+  warnings?: string[];
   page: PageSummary | null;
   robots: RobotsSummary;
   sitemap: SitemapSummary;
@@ -200,7 +293,93 @@ export interface AuditRecord {
   limitations: string[];
   /** Audit-specific reasons the report is partial (subset of limitations). */
   partialReasons: string[];
-  integrations: { pagespeed: string; searchConsole: string; ai: string; rendering: string; keywordData: string };
+  integrations: { pagespeed: string; searchConsole: string; ai: string; rendering: string; keywordData: string; aiVisibility?: string };
+}
+
+export interface PageInventoryItem {
+  url: string;
+  finalUrl: string;
+  status: number | null;
+  depth: number;
+  foundVia: "start" | "link" | "sitemap";
+  contentType: string | null;
+  responseMs: number | null;
+  redirects: number;
+  title: string | null;
+  description: string | null;
+  h1: string | null;
+  h1Count: number;
+  canonical: string | null;
+  noindex: boolean;
+  /** Indexability signals only (status, noindex, canonical); not actual index status. */
+  indexable: boolean | null;
+  wordCount: number;
+  inlinks: number;
+  internalLinksOut: number;
+  images: number;
+  imagesMissingAlt: number;
+  lang: string | null;
+  issues: string[];
+  error?: string;
+  /** Fingerprint of the normalised main text, used for duplicate detection. */
+  contentHash?: string;
+}
+
+export interface CrawlSummary {
+  enabled: boolean;
+  maxPages: number;
+  maxDepth: number;
+  discovered: number;
+  processed: number;
+  failed: number;
+  skippedRobots: number;
+  skippedOther: number;
+  stopReason: "complete" | "page_limit" | "time_budget" | "cancelled" | "not_run";
+  sitemapUrlsUsed: number;
+  durationMs: number;
+}
+
+export interface SecuritySummary {
+  headers: Record<string, string | null>;
+  httpRedirectsToHttps: boolean | null;
+  httpCheckError?: string;
+  /** True when plain HTTP (port 80) refused the connection, i.e. no insecure version is served. */
+  httpRefused?: boolean;
+  insecureCookies: string[];
+}
+
+export interface CompetitorSnapshot {
+  url: string;
+  finalUrl: string | null;
+  fetchedAt: string;
+  status: "ok" | "error" | "blocked";
+  error?: string;
+  httpStatus: number | null;
+  responseTimeMs: number | null;
+  title: string | null;
+  metaDescription: boolean;
+  h1Count: number;
+  wordCount: number;
+  schemaTypes: string[];
+  imagesMissingAlt: number;
+  images: number;
+  https: boolean;
+  scores: Partial<Record<Category, number | null>>;
+  passed: number;
+  failed: number;
+}
+
+export interface SearchConsoleResult {
+  status: "not_configured" | "not_connected" | "no_matching_property" | "ok" | "error";
+  message: string;
+  property?: string;
+  retrievedAt?: string;
+  dateRange?: { start: string; end: string };
+  totals?: { clicks: number; impressions: number; ctr: number; position: number };
+  pageTotals?: { clicks: number; impressions: number; ctr: number; position: number } | null;
+  topQueries?: { query: string; clicks: number; impressions: number; ctr: number; position: number }[];
+  inspection?: { verdict: string | null; coverageState: string | null; indexingState: string | null; lastCrawlTime: string | null; googleCanonical: string | null; robotsTxtState: string | null; error?: string } | null;
+  limitations: string[];
 }
 
 export interface PageSummary {
@@ -240,6 +419,8 @@ export interface SitemapSummary {
   totalUrls: number;
   includesAuditedUrl: boolean | null;
   truncated: boolean;
+  /** URLs read from the sitemaps (capped). Used for crawl seeding and orphan candidates; not persisted in full. */
+  urls?: string[];
 }
 
 export interface StructuredDataSummary {

@@ -151,7 +151,8 @@ function flattenHeaders(h: Record<string, string | string[] | undefined>): Recor
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(h)) {
     if (v === undefined) continue;
-    out[k.toLowerCase()] = Array.isArray(v) ? v.join(", ") : v;
+    // Set-Cookie values contain commas (Expires dates), so they are joined with newlines instead.
+    out[k.toLowerCase()] = Array.isArray(v) ? v.join(k.toLowerCase() === "set-cookie" ? "\n" : ", ") : v;
   }
   return out;
 }

@@ -29,6 +29,7 @@ export async function checkSitemaps(
   let totalUrls = 0;
   let includes = false;
   let truncated = false;
+  const urls: string[] = [];
 
   while (queue.length && checked.length < LIMITS.maxSitemapsFetched) {
     const url = queue.shift()!;
@@ -49,6 +50,7 @@ export async function checkSitemaps(
       if (rootName === "urlset") {
         const locs = $("url > loc").toArray().map((el) => $(el).text().trim());
         totalUrls += locs.length;
+        for (const l of locs) if (urls.length < LIMITS.maxSitemapUrlsKept) urls.push(l);
         if (locs.some((l) => normalizeForCompare(l) === target)) includes = true;
         checked.push({ url, httpStatus: res.status, type: "urlset", urlCount: locs.length });
       } else if (rootName === "sitemapindex") {
@@ -72,5 +74,6 @@ export async function checkSitemaps(
     // Only claim "not included" when every discovered sitemap was read.
     includesAuditedUrl: includes ? true : anyValid && fullyChecked ? false : null,
     truncated,
+    urls,
   };
 }

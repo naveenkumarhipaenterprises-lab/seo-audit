@@ -59,6 +59,7 @@ export function testDeps(fetcher: Fetcher, overrides: Partial<AuditDeps> = {}): 
     save: async (r) => {
       saved.push(r);
     },
+    sleep: async () => undefined,
     saved,
     ...overrides,
   };
@@ -66,6 +67,11 @@ export function testDeps(fetcher: Fetcher, overrides: Partial<AuditDeps> = {}): 
 
 export const baseInput = (url: string, extra: Partial<AuditInput> = {}): AuditInput => ({
   url,
+  mode: "quick",
+  maxPages: 10,
+  maxDepth: 2,
+  performanceStrategy: "both",
+  useSearchConsole: false,
   primaryKeyword: "",
   secondaryKeywords: [],
   competitorUrls: [],

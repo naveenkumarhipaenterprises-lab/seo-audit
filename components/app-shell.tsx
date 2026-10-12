@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { BarChart3, Bot, FileText, FolderKanban, History, LayoutDashboard, Menu, MessageCircleQuestion, PlusCircle, Search, Settings, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AuditJobsProvider } from "@/components/audit-jobs";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -53,7 +54,9 @@ export function AppShell({ appName, tagline, currentSite, children }: { appName:
   }, []);
 
   return (
+    <AuditJobsProvider>
     <div className="min-h-screen">
+      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-brand-700 focus:shadow">Skip to content</a>
       <aside className="no-print fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-slate-200 bg-white px-4 py-5 lg:flex">
         <Logo name={appName} />
         <p className="mt-1 mb-6 pl-10 text-xs text-slate-500">{tagline}</p>
@@ -95,8 +98,9 @@ export function AppShell({ appName, tagline, currentSite, children }: { appName:
             <Link href="/audit/new" className="hidden rounded-lg bg-brand-600 px-3 py-1.5 font-medium text-white hover:bg-brand-700 sm:inline-flex">New audit</Link>
           </div>
         </header>
-        <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:py-8">{children}</main>
+        <main id="main" className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:py-8">{children}</main>
       </div>
     </div>
+    </AuditJobsProvider>
   );
 }
