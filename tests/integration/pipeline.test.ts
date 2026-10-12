@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runAudit, AuditFailedError, AuditAbortedError } from "@/lib/audit/run";
 import type { AuditEvent, AuditRecord } from "@/lib/audit/types";
-import { STAGES } from "@/lib/audit/types";
+import { stagesForMode } from "@/lib/audit/types";
 import { baseInput, fixture, fixtureFetcher, PNG, testDeps, type Route } from "../helpers";
 
 const H = "https://www.example-healthy.com";
@@ -36,8 +36,8 @@ describe("audit pipeline on fixtures", () => {
     const { rec, events, deps } = await audit(healthyRoutes, `${H}/spice-blends`, { primaryKeyword: "spice blends" });
     expect(rec.status).toBe("partial"); // performance not run in tests -> partial
     expect(deps.saved[0].id).toBe(rec.id);
-    const done = events.filter((e) => e.type === "stage" && (e.status === "done" || e.status === "skipped")).map((e) => (e as { stage: string }).stage);
-    expect(new Set(done)).toEqual(new Set(STAGES.map((s) => s.id as string)));
+    const done = events.filter((e) => e.type === "stage" && (e.status === "completed" || e.status === "skipped")).map((e) => (e as { stage: string }).stage);
+    expect(new Set(done)).toEqual(new Set(stagesForMode("quick").map((s) => s.id as string)));
     expect(events.at(-1)).toMatchObject({ type: "done", auditId: rec.id });
     expect(check(rec, "title-present")?.status).toBe("pass");
     expect(check(rec, "canonical-target")?.status).toBe("pass");
@@ -180,11 +180,39 @@ describe("audit pipeline on fixtures", () => {
     await expect(audit({ "https://x.example.com/": { body: "%PDF", headers: { "content-type": "application/pdf" } } }, "https://x.example.com/")).rejects.toThrow(/not an HTML page/);
   });
 
+  it("audits a page that returns a server error and reports it as critical", async () => {
+    const { rec } = await audit({ "https://err.example.com/": { status: 500, body: "<html><title>Error</title><body>Internal error</body></html>" } }, "https://err.example.com/");
+    expect(check(rec, "http-status")?.status).toBe("fail");
+    expect(check(rec, "http-status")?.severity).toBe("critical");
+  });
+
+  it("checks HTTP to HTTPS only from real evidence", async () => {
+    const page = { body: fixture("healthy.html") };
+    const redirecting = await audit({ "https://s.example.com/": page, "http://s.example.com/": { redirect: "https://s.example.com/", status: 301 } }, "https://s.example.com/");
+    expect(check(redirecting.rec, "sec-http-to-https")?.status).toBe("pass");
+    const served = await audit({ "https://s.example.com/": page, "http://s.example.com/": page }, "https://s.example.com/");
+    expect(check(served.rec, "sec-http-to-https")?.status).toBe("fail");
+    // An error status (for example from a proxy or firewall) proves nothing either way.
+    const unknown = await audit({ "https://s.example.com/": page, "http://s.example.com/": { status: 405, body: "" } }, "https://s.example.com/");
+    expect(check(unknown.rec, "sec-http-to-https")?.status).toBe("not_tested");
+  });
+
+  it("keeps auditing when the sitemap is inaccessible", async () => {
+    const { rec } = await audit({
+      "https://sm.example.com/robots.txt": { body: "User-agent: *\nAllow: /\nSitemap: https://sm.example.com/sitemap.xml\n", headers: { "content-type": "text/plain" } },
+      "https://sm.example.com/sitemap.xml": { status: 503, body: "unavailable" },
+      "https://sm.example.com/": { body: fixture("healthy.html") },
+    }, "https://sm.example.com/");
+    expect(rec.sitemap.status).not.toBe("found");
+    expect(check(rec, "sitemap-found")?.status).not.toBe("pass");
+    expect(check(rec, "title-present")?.status).toBe("pass");
+  });
+
   it("stops when cancelled", async () => {
     const ctrl = new AbortController();
     const fetcher = fixtureFetcher({ "https://x.example.com/": { body: "<title>x</title>" } });
     const deps = testDeps(fetcher);
-    const p = runAudit(baseInput("https://x.example.com/"), deps, (e) => { if (e.type === "stage" && e.stage === "fetch" && e.status === "done") ctrl.abort(); }, ctrl.signal);
+    const p = runAudit(baseInput("https://x.example.com/"), deps, (e) => { if (e.type === "stage" && e.stage === "fetch" && e.status === "completed") ctrl.abort(); }, ctrl.signal);
     await expect(p).rejects.toBeInstanceOf(AuditAbortedError);
     expect(deps.saved).toHaveLength(0);
   });

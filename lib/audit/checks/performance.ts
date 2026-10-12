@@ -13,7 +13,8 @@ const LAB_THRESHOLDS: Record<string, [number, number, (v: number) => string]> = 
 export function performanceChecks(ctx: CheckContext): CheckResult[] {
   const b = builder("performance", "Performance", ctx.url);
   const out: CheckResult[] = [];
-  for (const strategy of ["mobile", "desktop"] as const) {
+  const wanted = ctx.input.performanceStrategy === "mobile" ? ["mobile"] as const : ctx.input.performanceStrategy === "desktop" ? ["desktop"] as const : ["mobile", "desktop"] as const;
+  for (const strategy of wanted) {
     const r = ctx.performance.find((p) => p.strategy === strategy);
     const label = strategy === "mobile" ? "Mobile" : "Desktop";
     if (!r || r.status !== "ok" || r.score === null) {
@@ -40,11 +41,18 @@ export function performanceChecks(ctx: CheckContext): CheckResult[] {
     }
     const f = r.field;
     out.push(b(`perf-field-${strategy}`, `${label} real-user (field) data`, "info", "low",
-      f.source === "none" ? "Chrome UX Report has no field data for this URL or origin (not enough real-user traffic)." :
+      f.source === "none" ? "No field data available. The Chrome UX Report has no real-user data for this URL or origin (not enough traffic)." :
         `Field data from the Chrome UX Report (${f.source === "origin" ? "origin-level fallback" : "this URL"}), overall: ${f.overall || "n/a"}.`,
       "Field data reflects real users over the previous 28 days.", "PageSpeed Insights loadingExperience.",
       Object.entries(f.metrics).map(([k, m]) => `${k} p75: ${m.p75 ?? "n/a"}${k === "CLS" ? "" : " ms"} (${m.category ?? "n/a"})`),
-      "INP is only available as field data; it is not invented when CrUX has no data."));
+      "INP is only available as field data; it is not invented when CrUX has no data. Lab TBT is a different metric and is not substituted for INP."));
+    const cats = r.categories;
+    if (cats && (cats.bestPractices !== null || cats.seo !== null)) {
+      out.push(b(`perf-lighthouse-other-${strategy}`, `${label} Lighthouse best practices and SEO`, "info", "low",
+        `Lighthouse best practices: ${cats.bestPractices ?? "not returned"}/100, Lighthouse SEO: ${cats.seo ?? "not returned"}/100.`,
+        "Review failing audits in PageSpeed Insights.", "Google PageSpeed Insights, Lighthouse categories.", [],
+        "Shown for reference; these are Google's automated audits and are not added to this tool's scores, to avoid counting issues twice."));
+    }
   }
   return out;
 }

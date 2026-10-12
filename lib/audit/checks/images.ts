@@ -3,6 +3,8 @@ import type { CheckResult } from "../types";
 
 const FILENAME_ALT = /^(img|image|photo|picture|pic|dsc|screenshot|untitled)?[-_ ]?\d*(\.(jpe?g|png|gif|webp|avif|svg))?$/i;
 
+const assess = (c: CheckResult): CheckResult => ({ ...c, source: "assessment" });
+
 export function imageChecks(ctx: CheckContext): CheckResult[] {
   const b = builder("images", "Images", ctx.url);
   const imgs = ctx.images;
@@ -11,11 +13,13 @@ export function imageChecks(ctx: CheckContext): CheckResult[] {
       "Images added only by JavaScript or CSS backgrounds are not detected in the static HTML.")];
   }
   const out: CheckResult[] = [];
+  const multi = new Set(imgs.map((i) => i.sourcePage)).size > 1;
+  const where = (i: (typeof imgs)[number]) => (multi ? `${i.src} (on ${i.sourcePage})` : i.src);
   const missing = imgs.filter((i) => i.altState === "missing");
   out.push(b("img-alt-missing", "Missing ALT attributes", missing.length ? "fail" : "pass", "medium",
     missing.length ? `${missing.length} of ${imgs.length} image(s) have no alt attribute at all. Screen readers may announce the file name and search engines lose context.` : "Every image has an alt attribute.",
     missing.length ? 'Add descriptive alt text to informative images, or alt="" to purely decorative ones.' : "No action needed.",
-    "Checked presence of the alt attribute (missing is distinguished from intentionally empty).", missing.map((i) => i.src)));
+    "Checked presence of the alt attribute (missing is distinguished from intentionally empty).", missing.map(where)));
   const emptyAlt = imgs.filter((i) => i.altState === "empty");
   if (emptyAlt.length) {
     out.push(b("img-alt-empty", "Empty ALT (decorative)", "info", "low",
@@ -24,10 +28,35 @@ export function imageChecks(ctx: CheckContext): CheckResult[] {
       emptyAlt.map((i) => i.src), "Whether an image is decorative depends on context and needs human review."));
   }
   const poorAlt = imgs.filter((i) => i.altState === "present" && (FILENAME_ALT.test((i.alt || "").trim()) || (i.alt || "").length > 150));
-  out.push(b("img-alt-quality", "ALT text quality", poorAlt.length ? "warning" : "pass", "low",
+  out.push(assess(b("img-alt-quality", "ALT text quality", poorAlt.length ? "warning" : "pass", "low",
     poorAlt.length ? `${poorAlt.length} ALT text(s) look like file names/generic words or are very long.` : "ALT texts do not look like file names or placeholders.",
     poorAlt.length ? "Describe what the image shows in a short phrase." : "No action needed.", "Pattern match on ALT values.",
-    poorAlt.map((i) => `"${truncate(i.alt || "", 60)}" — ${i.src}`), "Heuristic; cannot judge whether the description is accurate."));
+    poorAlt.map((i) => `"${truncate(i.alt || "", 60)}" — ${i.src}`), "Heuristic; cannot judge whether the description is accurate.")));
+  const altGroups = new Map<string, Set<string>>();
+  for (const i of imgs) if (i.altState === "present") {
+    const k = (i.alt || "").trim().toLowerCase();
+    altGroups.set(k, (altGroups.get(k) || new Set()).add(i.src));
+  }
+  const repeated = Array.from(altGroups.entries()).filter(([, v]) => v.size >= 3);
+  out.push(assess(b("img-alt-repetitive", "Repetitive ALT text", repeated.length ? "warning" : "pass", "low",
+    repeated.length ? `${repeated.length} ALT text value(s) are reused on three or more different images, so they probably do not describe each image.` : "ALT texts are not reused across many different images.",
+    repeated.length ? "Describe each informative image individually; use alt=\"\" for decorative repeats." : "No action needed.",
+    "Grouped identical ALT values across different image URLs.", repeated.slice(0, 10).map(([alt, v]) => `"${truncate(alt, 60)}" on ${v.size} images`))));
+  const fileName = (u: string) => {
+    try {
+      return decodeURIComponent(new URL(u).pathname.split("/").pop() || "");
+    } catch {
+      return "";
+    }
+  };
+  const opaque = imgs.filter((i) => {
+    const f = fileName(i.src).replace(/\.[a-z0-9]+$/i, "");
+    return f && (/^(img|dsc|dcim|pxl|image|photo|screenshot|untitled)[-_ ]?\d+/i.test(f) || /^[a-f0-9-]{16,}$/i.test(f) || /^\d+$/.test(f));
+  });
+  out.push(assess(b("img-filenames", "Descriptive file names", opaque.length ? "info" : "pass", "low",
+    opaque.length ? `${opaque.length} image file name(s) are camera defaults, hashes or numbers (e.g. IMG_1234.jpg). Descriptive names are a minor relevance signal for image search.` : "Image file names are not camera defaults or opaque hashes.",
+    opaque.length ? "Use short descriptive file names for new important images. Renaming existing images is rarely worth breaking URLs." : "No action needed.",
+    "Pattern match on image file names.", opaque.slice(0, 15).map((i) => fileName(i.src)), "CDNs often rewrite file names; this is a weak signal.")));
   const probed = imgs.filter((i) => i.probe);
   if (!ctx.imagesProbed || !probed.length) {
     out.push(b("img-broken", "Broken images", "not_tested", "high", "Image URLs were not requested.", "—", "Image probing disabled or skipped."));

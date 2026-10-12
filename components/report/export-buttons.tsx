@@ -1,9 +1,10 @@
 "use client";
 import { useState } from "react";
-import { AlertTriangle, Download, FileSpreadsheet, Loader2, Printer, RotateCcw } from "lucide-react";
+import Link from "next/link";
+import { AlertTriangle, Download, FileSpreadsheet, Loader2, PlusCircle, Printer, RotateCcw } from "lucide-react";
 import { Button, buttonClass } from "@/components/ui/button";
 
-export function ExportButtons({ id }: { id: string }) {
+export function ExportButtons({ id, url }: { id: string; url: string }) {
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [err, setErr] = useState("");
   async function downloadPdf() {
@@ -30,9 +31,10 @@ export function ExportButtons({ id }: { id: string }) {
       <div className="flex flex-wrap gap-2">
         <Button onClick={downloadPdf} disabled={state === "loading"} data-testid="download-pdf">
           {state === "loading" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Download className="h-4 w-4" aria-hidden />}
-          {state === "loading" ? "Generating PDF…" : "Download PDF Report"}
+          {state === "loading" ? "Generating PDF…" : "Export PDF"}
         </Button>
         <a href={`/api/audits/${id}/csv`} className={buttonClass("secondary")} data-testid="export-csv"><FileSpreadsheet className="h-4 w-4" aria-hidden /> Export CSV</a>
+        <Link href={`/audit/new?url=${encodeURIComponent(url)}`} className={buttonClass("secondary")} data-testid="new-audit"><PlusCircle className="h-4 w-4" aria-hidden /> New Audit</Link>
         <Button variant="secondary" onClick={() => window.print()}><Printer className="h-4 w-4" aria-hidden /> Print</Button>
       </div>
       {state === "error" && (

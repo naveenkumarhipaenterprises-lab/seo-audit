@@ -1,12 +1,21 @@
 import "server-only";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { AuditRecord } from "../audit/types";
+import type { AuditFinalStatus, AuditMode, AuditRecord } from "../audit/types";
+import { normalizeRecord } from "../audit/record-utils";
+import { canAccess } from "../security/owner";
 
 export interface AuditSummary {
   id: string;
   createdAt: string;
-  status: AuditRecord["status"];
+  /** "complete" only on MVP-era summaries. */
+  status: AuditFinalStatus | "complete";
+  mode?: AuditMode;
+  pagesAnalyzed?: number;
+  ownerId?: string;
+  /** Present for failed or cancelled audits, which have no full report. */
+  failure?: { stage?: string; message: string };
+  hasReport?: boolean;
   url: string;
   finalUrl: string;
   overall: number | null;
@@ -19,14 +28,17 @@ export interface AuditSummary {
 }
 
 /**
- * Storage adapter. The MVP ships a file-system store; a Supabase adapter implementing
- * the same interface is planned for Phase 2 (see supabase/migrations).
+ * Storage adapter. Ships a file-system store; a Supabase adapter implementing the same
+ * interface can replace it (schema in supabase/migrations).
  */
 export interface AuditStore {
   save(record: AuditRecord): Promise<void>;
-  get(id: string): Promise<AuditRecord | null>;
-  list(limit?: number): Promise<AuditSummary[]>;
-  remove(id: string): Promise<boolean>;
+  /** Records a failed or cancelled audit (summary only, no report). */
+  saveOutcome(summary: AuditSummary): Promise<void>;
+  /** Returns the record only when `owner` may access it (see lib/security/owner). */
+  get(id: string, owner: string | null): Promise<AuditRecord | null>;
+  list(owner: string | null, limit?: number): Promise<AuditSummary[]>;
+  remove(id: string, owner: string | null): Promise<boolean>;
 }
 
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -37,6 +49,10 @@ export function summarize(r: AuditRecord): AuditSummary {
     id: r.id,
     createdAt: r.createdAt,
     status: r.status,
+    mode: r.input.mode || "quick",
+    pagesAnalyzed: r.pagesCrawled,
+    ownerId: r.ownerId,
+    hasReport: true,
     url: r.requestedUrl,
     finalUrl: r.finalUrl,
     overall: r.scores.overall.score,
@@ -60,15 +76,20 @@ class FileStore implements AuditStore {
     await fs.writeFile(this.file(record.id, "json"), JSON.stringify(record), { mode: 0o600 });
     await fs.writeFile(this.file(record.id, "meta.json"), JSON.stringify(summarize(record)), { mode: 0o600 });
   }
-  async get(id: string) {
+  async saveOutcome(summary: AuditSummary) {
+    await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(this.file(summary.id, "meta.json"), JSON.stringify({ ...summary, hasReport: false }), { mode: 0o600 });
+  }
+  async get(id: string, owner: string | null) {
     if (!isValidAuditId(id)) return null;
     try {
-      return JSON.parse(await fs.readFile(this.file(id, "json"), "utf8")) as AuditRecord;
+      const r = JSON.parse(await fs.readFile(this.file(id, "json"), "utf8")) as AuditRecord;
+      return canAccess(r.ownerId, owner) ? normalizeRecord(r) : null;
     } catch {
       return null;
     }
   }
-  async list(limit = 50) {
+  async list(owner: string | null, limit = 50) {
     let names: string[];
     try {
       names = (await fs.readdir(this.dir)).filter((n) => n.endsWith(".meta.json"));
@@ -81,16 +102,25 @@ class FileStore implements AuditStore {
       try {
         const s = JSON.parse(await fs.readFile(path.join(/* turbopackIgnore: true */ this.dir, n), "utf8")) as AuditSummary;
         if (this.retentionDays > 0 && Date.parse(s.createdAt) < cutoff) {
-          await this.remove(s.id);
+          await this.purge(s.id);
           continue;
         }
-        items.push(s);
+        if (canAccess(s.ownerId, owner)) items.push(s);
       } catch {}
     }
     return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
   }
-  async remove(id: string) {
+  async remove(id: string, owner: string | null) {
     if (!isValidAuditId(id)) return false;
+    try {
+      const s = JSON.parse(await fs.readFile(this.file(id, "meta.json"), "utf8")) as AuditSummary;
+      if (!canAccess(s.ownerId, owner)) return false;
+    } catch {
+      return false;
+    }
+    return this.purge(id);
+  }
+  private async purge(id: string) {
     let removed = false;
     for (const kind of ["json", "meta.json"] as const) {
       try {

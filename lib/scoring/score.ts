@@ -1,5 +1,6 @@
+import { sourceOf } from "../audit/record-utils";
 import { CATEGORY_LABELS, type Category, type CheckResult, type CheckStatus, type Scores } from "../audit/types";
-import { CHECK_WEIGHT_OVERRIDES, METHODOLOGY_VERSION, OVERALL_WEIGHTS, SEO_COMPONENT_WEIGHTS, SEVERITY_WEIGHTS, STATUS_CREDIT } from "./weights";
+import { CHECK_WEIGHT_OVERRIDES, METHODOLOGY_VERSION, OVERALL_WEIGHTS, SEO_COMPONENT_WEIGHTS, SEVERITY_WEIGHTS, STATUS_CREDIT, type OverallComponent } from "./weights";
 
 const CATEGORIES = Object.keys(CATEGORY_LABELS) as Category[];
 const round = (n: number) => Math.round(n);
@@ -59,11 +60,14 @@ export function computeScores(checks: CheckResult[]): Scores {
 
   const seoParts = (Object.entries(SEO_COMPONENT_WEIGHTS) as [Category, number][]).map(([category, weight]) => ({ category, weight, score: categories[category].score }));
   const seo = combine(seoParts);
-  const overallParts = [
-    { name: "SEO" as const, weight: OVERALL_WEIGHTS.SEO, score: seo.score },
-    { name: "AEO" as const, weight: OVERALL_WEIGHTS.AEO, score: categories.aeo.score },
-    { name: "GEO" as const, weight: OVERALL_WEIGHTS.GEO, score: categories.geo.score },
-  ];
+  const partScore: Record<OverallComponent, number | null> = {
+    SEO: seo.score,
+    AEO: categories.aeo.score,
+    GEO: categories.geo.score,
+    Accessibility: categories.accessibility.score,
+    Security: categories.security.score,
+  };
+  const overallParts = (Object.keys(OVERALL_WEIGHTS) as OverallComponent[]).map((name) => ({ name, weight: OVERALL_WEIGHTS[name], score: partScore[name] }));
   const overall = combine(overallParts);
   const tested = checks.filter((c) => c.status !== "info" && c.status !== "not_applicable");
   return {
@@ -72,11 +76,14 @@ export function computeScores(checks: CheckResult[]): Scores {
     seo: { score: seo.score, components: seo.parts.map(({ category, weight, score, contribution }) => ({ category, weight, score, contribution })) },
     overall: {
       score: overall.score,
-      formula: `Overall = SEO × ${OVERALL_WEIGHTS.SEO}% + AEO × ${OVERALL_WEIGHTS.AEO}% + GEO × ${OVERALL_WEIGHTS.GEO}% (weights of untested components are redistributed proportionally). SEO = ${Object.entries(SEO_COMPONENT_WEIGHTS).map(([k, v]) => `${CATEGORY_LABELS[k as Category]} × ${v}`).join(" + ")} (normalised over tested components).`,
+      formula: `Overall = ${(Object.keys(OVERALL_WEIGHTS) as OverallComponent[]).map((k) => `${k} × ${OVERALL_WEIGHTS[k]}%`).join(" + ")} (weights of untested components are redistributed proportionally). SEO = ${Object.entries(SEO_COMPONENT_WEIGHTS).map(([k, v]) => `${CATEGORY_LABELS[k as Category]} × ${v}`).join(" + ")} (normalised over tested components).`,
       components: overall.parts.map(({ name, weight, effectiveWeight, score, contribution }) => ({ name, weight, effectiveWeight: Math.round(effectiveWeight * 1000) / 10, score, contribution })),
       partial: overallParts.some((p) => p.score === null) || seoParts.some((p) => p.score === null),
     },
     totals: {
+      tested: checks.filter((c) => c.status === "pass" || c.status === "warning" || c.status === "fail").length,
+      notApplicable: checks.filter((c) => c.status === "not_applicable").length,
+      info: checks.filter((c) => c.status === "info").length,
       errors: tested.filter((c) => c.status === "fail").length,
       warnings: tested.filter((c) => c.status === "warning").length,
       passed: tested.filter((c) => c.status === "pass").length,
@@ -90,9 +97,21 @@ export function computeScores(checks: CheckResult[]): Scores {
 const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3 } as const;
 const STATUS_ORDER: Record<CheckStatus, number> = { fail: 0, warning: 1, not_tested: 2, info: 3, pass: 4, not_applicable: 5 };
 
-/** Issues (fail/warning) ordered by severity then status: the "fix first" list. */
+const SOURCE_ORDER = { observed: 0, external: 1, assessment: 2 } as const;
+const affected = (c: CheckResult) => c.affectedUrls?.length || 1;
+
+/**
+ * Issues (fail/warning) in "fix first" order: severity, then failures before warnings, then
+ * the number of affected pages, then directly observed evidence before external data and
+ * tool assessments.
+ */
 export function prioritizedIssues(checks: CheckResult[]): CheckResult[] {
   return checks
     .filter((c) => c.status === "fail" || c.status === "warning")
-    .sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity] || STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || checkPoints(b) - checkPoints(a));
+    .sort((a, b) =>
+      SEV_ORDER[a.severity] - SEV_ORDER[b.severity] ||
+      STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+      affected(b) - affected(a) ||
+      SOURCE_ORDER[sourceOf(a)] - SOURCE_ORDER[sourceOf(b)] ||
+      checkPoints(b) - checkPoints(a));
 }

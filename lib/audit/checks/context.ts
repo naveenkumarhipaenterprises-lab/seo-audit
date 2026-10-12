@@ -2,7 +2,7 @@ import type { ParsedPage } from "../parse";
 import type { RobotsContext } from "../robots";
 import type {
   AuditInput, Category, CheckResult, CheckStatus, ImageRecord, LinkRecord, PerformanceResult, RenderResult, Severity,
-  SitemapSummary, StructuredDataSummary,
+  SecuritySummary, SitemapSummary, StructuredDataSummary,
 } from "../types";
 
 export interface CheckContext {
@@ -23,6 +23,9 @@ export interface CheckContext {
   imagesProbed: boolean;
   render: RenderResult;
   performance: PerformanceResult[];
+  security?: SecuritySummary;
+  /** Every crawled page (Full Site mode) or just the start page (Quick mode). */
+  sitePages?: { url: string; parsed: ParsedPage }[];
 }
 
 type Spec = Omit<CheckResult, "evidence" | "limitation" | "measuredScore"> & {
